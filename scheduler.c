@@ -1,738 +1,288 @@
 /*
- * scheduler.c - the OS scheduler
+ * scheduler.c
+ * The scheduler process: connects the scheduling engine (sched_core.c) to
+ * the real system.
  *
- * Started by the process generator as:  ./scheduler.out <algorithm> <quantum> <switch time>
+ *  - Receives arriving processes from the process generator (message queue).
+ *    For every clock second the generator sends the arrivals of that second
+ *    followed by a TICK_END message, so the scheduler never misses or
+ *    reorders an arrival.
+ *  - Forks process.out on first dispatch, SIGSTOP/SIGCONT to switch.
+ *  - Keeps each process's remaining time in a private shared memory segment.
+ *  - Waits for the process's own termination message (it never kills it).
+ *  - Writes scheduler.log and scheduler.perf.
  *
- * Design
- * ------
- * The scheduler simulates the machine one clock second at a time ("logical time"
- * `now`).  For every second it waits until the clock has reached it, receives the
- * arrivals of that second from the generator, and then runs simulateTick(), which
- * applies the events in the order fixed by the project document:
- *
- *     0. a context switch that ends at this second completes (the process starts)
- *     1. the running process's own events:  release, capture, finish
- *     2. arrivals, in id order
- *     3. RR quantum expiry, preemption checks, and the choice of the next process
- *
- * Because the logical second is decoupled from the wall clock, a scheduler that is
- * a few milliseconds late still produces exactly the same log.
- *
- * Data structures
- * ---------------
- *   SJF                  binary min-heap ordered by (runtime, arrival, id)
- *   HPF / HPF+demotion   binary min-heap ordered by (effective priority, id);
- *                        a priority change re-keys one entry in O(log n)
- *                        (inheritance) or the whole heap in O(n) (aging)
- *   RR                   FIFO linked list
- *   Resource             holder + array of blocked waiters
- *
- * IPC
- * ---
- *   generator -> scheduler   message queue (arrivals + "second complete" marker)
- *   scheduler -> process     SIGSTOP / SIGCONT, plus a shared-memory counter that
- *                            holds the process's remaining time
- *   process   -> scheduler   message queue (termination notice); the scheduler
- *                            never terminates a process, it only reaps it
- *   clock     -> scheduler   shared memory (getClk)
+ * Usage (normally launched by process_generator.out):
+ *   scheduler.out <algorithm 1-4> [quantum] [context_switch]
  */
 #include "headers.h"
-#include "common.h"
-#include "pcb.h"
+#include "sched_core.h"
 
-/* Behaviour at the instant a context switch ends (HPF family only).
- *
- * A process that arrives while a switch is in progress (up to and including the
- * second the switch ends) simply joins the Ready set; the process being switched in
- * was chosen when the switch began.  The question is whether such an arrival may
- * preempt the process in that very second:
- *   0 (default): no.  The process that has just started always runs for at least one
- *                second; the ordinary per-second preemption check takes the newcomer
- *                into account one second later.  No "started" line is ever followed
- *                by a "stopped" line with the same timestamp.
- *   1:           yes.  The newcomer preempts at once (logged started + stopped at the
- *                same second, followed by another context switch).
- * The project document does not spell this case out; it is the one rule worth
- * confirming with the TA (see the report). Build with -DPREEMPT_AT_DISPATCH=1 to switch. */
-#ifndef PREEMPT_AT_DISPATCH
-#define PREEMPT_AT_DISPATCH 0
-#endif
+static Scheduler scheduler;
+static int schedulerInitialized = 0;
+static int generatorQueueId = -1;
+static int processQueueId = -1;
+static FILE *logFile = NULL;
 
 /* ------------------------------------------------------------------ */
-/*  State                                                              */
+/*                    OS hooks called by the engine                    */
 /* ------------------------------------------------------------------ */
-static int algorithm, quantum, switchTime;
-static int now;                         /* logical clock second being simulated */
 
-static int genQueue = -1, doneQueue = -1;
-static FILE *logFile;
-
-static Heap readyHeap;                  /* SJF, HPF, HPF+demotion */
-static Fifo readyFifo;                  /* RR */
-
-static PCB *running;                    /* process on the CPU (NULL: idle or switching) */
-static PCB *switchTarget;               /* process being switched in (NULL: no switch) */
-static int  switchEnd;                  /* second at which the switch completes */
-static int  sliceLeft;                  /* RR: seconds left in the current quantum */
-
-static bool allArrived;                 /* the generator announced the last arrival */
-static int  totalProcs, finishedCount;
-
-static PCB **arrivals;                  /* processes that arrived in the current second */
-static int numArrivals, capArrivals;
-
-static Resource **resTable;
-static int numRes, capRes;
-
-static PCB *aliveList;                  /* every forked process, for emergency cleanup */
-
-/* statistics */
-static long   totalRuntime, totalWait;
-static int    lastFinish;
-static double *wtaList;
-static int    wtaCap;
-
-/* ------------------------------------------------------------------ */
-/*  Small helpers                                                      */
-/* ------------------------------------------------------------------ */
-static void *xrealloc(void *ptr, size_t size)
+static void release_process_memory(PCB *pcb)
 {
-    void *p = realloc(ptr, size);
-    if (p == NULL)
-    {
-        perror("scheduler: out of memory");
-        exit(1);
+    if (pcb->sharedRemainingTime) {
+        shmdt((const void *)pcb->sharedRemainingTime);
+        pcb->sharedRemainingTime = NULL;
     }
-    return p;
-}
-
-static bool usesHeap(void)  { return algorithm != ALGO_RR; }
-static bool isHpf(void)     { return algorithm == ALGO_HPF || algorithm == ALGO_HPF_DEMOTION; }
-
-/* ------------------------------------------------------------------ */
-/*  Priorities and ready queue                                         */
-/* ------------------------------------------------------------------ */
-
-/* Priority used to compare processes (smaller = higher).
- *  - Running, Blocked, or plain HPF: the priority in force (original, or inherited).
- *  - HPF with demotion, Ready process: the better of the aged priority and the
- *    inherited one.  bonus = floor((w-20)/5)+1 once the process has waited w >= 20 s. */
-static int effPriority(const PCB *p)
-{
-    int eff = p->curPriority;
-    if (algorithm == ALGO_HPF_DEMOTION && p->state == PS_READY)
-    {
-        int w = now - p->readySince;
-        int bonus = (w < 20) ? 0 : (w - 20) / 5 + 1;
-        int aged = p->priority - bonus;
-        if (aged < 0)
-            aged = 0;
-        if (aged < eff)
-            eff = aged;
+    if (pcb->sharedMemoryId != -1) {
+        shmctl(pcb->sharedMemoryId, IPC_RMID, NULL);
+        pcb->sharedMemoryId = -1;
     }
-    return eff;
 }
 
-static int precedesSjf(const PCB *a, const PCB *b)
+/* Start a new process: fork it and give it its parameters. */
+static void on_start(PCB *pcb, void *context)
 {
-    if (a->runtime != b->runtime) return a->runtime < b->runtime;
-    if (a->arrival != b->arrival) return a->arrival < b->arrival;
-    return a->id < b->id;
-}
-
-static int precedesHpf(const PCB *a, const PCB *b)
-{
-    int ea = effPriority(a), eb = effPriority(b);
-    if (ea != eb) return ea < eb;
-    return a->id < b->id;
-}
-
-/* A process enters the Ready state at this second. */
-static void readyPush(PCB *p)
-{
-    p->state = PS_READY;
-    p->readySince = now;
-    if (usesHeap())
-        heapPush(&readyHeap, p);
-    else
-        fifoPush(&readyFifo, p);
-}
-
-static bool readyEmpty(void)
-{
-    return usesHeap() ? readyHeap.size == 0 : readyFifo.size == 0;
-}
-
-static PCB *readyPeek(void)
-{
-    return usesHeap() ? heapPeek(&readyHeap) : readyFifo.head;
-}
-
-static PCB *readyPop(void)
-{
-    return usesHeap() ? heapPop(&readyHeap) : fifoPop(&readyFifo);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Log                                                                */
-/* ------------------------------------------------------------------ */
-static void logEvent(const PCB *p, const char *state)
-{
-    int wait = now - p->arrival - p->executed;
-    fprintf(logFile, "At time %d process %d %s arr %d total %d remain %d wait %d",
-            now, p->id, state, p->arrival, p->runtime, p->remaining, wait);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Resources                                                          */
-/* ------------------------------------------------------------------ */
-static Resource *findResource(const char *name)
-{
-    for (int i = 0; i < numRes; i++)
-        if (strcmp(resTable[i]->name, name) == 0)
-            return resTable[i];
-    if (numRes == capRes)
-    {
-        capRes = capRes ? 2 * capRes : 8;
-        resTable = xrealloc(resTable, capRes * sizeof(Resource *));
-    }
-    Resource *r = calloc(1, sizeof(Resource));
-    if (r == NULL)
-    {
-        perror("scheduler: out of memory");
-        exit(1);
-    }
-    strncpy(r->name, name, MAX_RES_NAME - 1);
-    resTable[numRes++] = r;
-    return r;
-}
-
-static void addWaiter(Resource *r, PCB *p)
-{
-    if (r->numWaiters == r->capWaiters)
-    {
-        r->capWaiters = r->capWaiters ? 2 * r->capWaiters : 4;
-        r->waiters = xrealloc(r->waiters, r->capWaiters * sizeof(PCB *));
-    }
-    r->waiters[r->numWaiters++] = p;
-}
-
-/* Index of the waiter that gets the resource: best original priority, then smaller id. */
-static int bestWaiter(const Resource *r)
-{
-    int best = 0;
-    for (int i = 1; i < r->numWaiters; i++)
-    {
-        const PCB *a = r->waiters[i], *b = r->waiters[best];
-        if (a->priority < b->priority || (a->priority == b->priority && a->id < b->id))
-            best = i;
-    }
-    return best;
-}
-
-/* The running process p releases the resource it holds.  The resource goes directly
- * to the best blocked waiter, which becomes Ready (it must still be scheduled), and
- * p loses any priority it inherited through the resource. */
-static void releaseResource(PCB *p)
-{
-    Resource *r = p->uses[p->heldUse].res;
-    p->heldUse = -1;
-    p->curPriority = p->priority;
-    r->holder = NULL;
-
-    if (r->numWaiters == 0)
-        return;
-
-    int idx = bestWaiter(r);
-    PCB *w = r->waiters[idx];
-    r->waiters[idx] = r->waiters[--r->numWaiters];
-
-    r->holder = w;
-    w->waitingOn = NULL;
-    w->heldUse = w->nextUse++;          /* the pending capture is now done */
-
-    /* the new holder inherits from the processes still waiting (never better than
-     * its own priority here, but computed generally) */
-    w->curPriority = w->priority;
-    for (int i = 0; i < r->numWaiters; i++)
-        if (r->waiters[i]->priority < w->curPriority)
-            w->curPriority = r->waiters[i]->priority;
-
-    readyPush(w);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Process control                                                    */
-/* ------------------------------------------------------------------ */
-static void aliveInsert(PCB *p)
-{
-    p->prevAlive = NULL;
-    p->nextAlive = aliveList;
-    if (aliveList)
-        aliveList->prevAlive = p;
-    aliveList = p;
-}
-
-static void aliveRemove(PCB *p)
-{
-    if (p->prevAlive) p->prevAlive->nextAlive = p->nextAlive; else aliveList = p->nextAlive;
-    if (p->nextAlive) p->nextAlive->prevAlive = p->prevAlive;
-}
-
-/* Fork the process and give it its parameters. */
-static void startProcess(PCB *p)
-{
-    p->shmid = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0600);
-    if (p->shmid == -1)
-    {
+    (void)context;
+    pcb->sharedMemoryId = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);
+    if (pcb->sharedMemoryId == -1) {
         perror("scheduler: shmget");
-        exit(1);
+        return;
     }
-    p->remainingShm = (int *)shmat(p->shmid, NULL, 0);
-    if (p->remainingShm == (int *)-1)
-    {
+    int *remaining = (int *)shmat(pcb->sharedMemoryId, NULL, 0);
+    if ((long)remaining == -1) {
         perror("scheduler: shmat");
-        exit(1);
+        release_process_memory(pcb);
+        return;
     }
-    *p->remainingShm = p->remaining;
+    *remaining = pcb->runtime - pcb->executedTime;
+    pcb->sharedRemainingTime = remaining;
 
-    char idArg[16], shmArg[16];
-    snprintf(idArg, sizeof idArg, "%d", p->id);
-    snprintf(shmArg, sizeof shmArg, "%d", p->shmid);
-    fflush(logFile);
-    p->pid = fork();
-    if (p->pid == -1)
-    {
+    pid_t pid = fork();
+    if (pid == -1) {
         perror("scheduler: fork");
-        exit(1);
+        return;
     }
-    if (p->pid == 0)
-    {
-        execl("./process.out", "process.out", idArg, shmArg, (char *)NULL);
-        perror("scheduler: cannot start ./process.out");
+    if (pid == 0) {
+        char idText[16], runtimeText[16], shmText[16];
+        snprintf(idText, sizeof idText, "%d", pcb->id);
+        snprintf(runtimeText, sizeof runtimeText, "%d", pcb->runtime);
+        snprintf(shmText, sizeof shmText, "%d", pcb->sharedMemoryId);
+        execl("./process.out", "process.out", idText, runtimeText, shmText, (char *)NULL);
+        perror("scheduler: execl process.out");
         _exit(1);
     }
-    p->started = true;
-    aliveInsert(p);
+    pcb->systemPid = pid;
 }
 
-/* Put p on the CPU: fork it the first time, otherwise continue it. */
-static void dispatch(PCB *p)
+static void on_resume(PCB *pcb, void *context)
 {
-    if (!p->started)
-    {
-        startProcess(p);
-        logEvent(p, "started");
-    }
-    else
-    {
-        kill(p->pid, SIGCONT);
-        logEvent(p, "resumed");
-    }
-    fputc('\n', logFile);
-    p->state = PS_RUNNING;
-    running = p;
-    sliceLeft = quantum;
+    (void)context;
+    if (pcb->systemPid > 0)
+        kill(pcb->systemPid, SIGCONT);
 }
 
-/* Take the running process off the CPU because it was preempted. */
-static void preemptRunning(void)
+static void on_stop(PCB *pcb, void *context)
 {
-    PCB *p = running;
-    kill(p->pid, SIGSTOP);
-    logEvent(p, "stopped");
-    fputc('\n', logFile);
-    running = NULL;
-    readyPush(p);
+    (void)context;
+    if (pcb->systemPid > 0)
+        kill(pcb->systemPid, SIGSTOP);
 }
 
-/* The running process asked for a resource somebody else holds: it blocks, and the
- * holder inherits its priority if that is higher. */
-static void blockRunning(PCB *p, Resource *r)
+/* The process ran for one more second: publish its remaining time. */
+static void on_execute(PCB *pcb, void *context)
 {
-    kill(p->pid, SIGSTOP);
-    logEvent(p, "stopped");
-    fputc('\n', logFile);
-
-    p->state = PS_BLOCKED;
-    p->waitingOn = r;
-    addWaiter(r, p);
-    running = NULL;
-
-    PCB *holder = r->holder;
-    if (p->curPriority < holder->curPriority)
-    {
-        holder->curPriority = p->curPriority;
-        if (usesHeap())
-            heapFix(&readyHeap, holder);       /* no-op unless the holder is queued */
-    }
+    (void)context;
+    if (pcb->sharedRemainingTime)
+        *pcb->sharedRemainingTime = pcb->runtime - pcb->executedTime;
 }
 
-/* The running process consumed all its runtime: wait for its termination notice,
- * reap it, log it, update the statistics and delete its PCB. */
-static void finishProcess(PCB *p)
+/* Remaining time reached 0: wait until the process notifies us, then reap it. */
+static void on_finish(PCB *pcb, void *context)
 {
-    DoneMsg done;
-    while (msgrcv(doneQueue, &done, DONE_MSG_SIZE, p->id, 0) == -1)
-    {
-        if (errno == EINTR)
-            continue;
-        perror("scheduler: waiting for a termination notice");
-        break;
-    }
-    waitpid(p->pid, NULL, 0);
-    shmdt(p->remainingShm);
-    shmctl(p->shmid, IPC_RMID, NULL);
-
-    int ta = now - p->arrival;
-    double wta = (double)ta / p->runtime;
-    int wait = ta - p->runtime;
-
-    logEvent(p, "finished");
-    fprintf(logFile, " TA %d WTA %.2f\n", ta, wta);
-
-    totalRuntime += p->runtime;
-    totalWait += wait;
-    lastFinish = now;
-    if (finishedCount == wtaCap)
-    {
-        wtaCap = wtaCap ? 2 * wtaCap : 64;
-        wtaList = xrealloc(wtaList, wtaCap * sizeof(double));
-    }
-    wtaList[finishedCount++] = wta;
-
-    aliveRemove(p);
-    running = NULL;
-    free(p->uses);
-    free(p);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Arrivals                                                           */
-/* ------------------------------------------------------------------ */
-
-/* Receive every message of the current second, up to and including the marker. */
-static void receiveArrivals(void)
-{
-    ResourceUse *pending = NULL;
-    int numPending = 0, capPending = 0;
-
-    numArrivals = 0;
-    for (;;)
-    {
-        GenMsg m;
-        if (msgrcv(genQueue, &m, GEN_MSG_SIZE, now, 0) == -1)
-        {
+    (void)context;
+    if (pcb->systemPid <= 0)
+        return;
+    ProcessMessage message;
+    for (;;) {
+        ssize_t received = msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
+                                  MSG_PROCESS_FINISHED, 0);
+        if (received == -1) {
             if (errno == EINTR)
                 continue;
-            perror("scheduler: receiving arrivals");
-            exit(1);
-        }
-
-        if (m.kind == MSG_RESOURCE)
-        {
-            if (numPending == capPending)
-            {
-                capPending = capPending ? 2 * capPending : 4;
-                pending = xrealloc(pending, capPending * sizeof(ResourceUse));
-            }
-            memcpy(pending[numPending].name, m.resource, MAX_RES_NAME);
-            pending[numPending].name[MAX_RES_NAME - 1] = '\0';
-            pending[numPending].capture = m.capture;
-            pending[numPending].release = m.release;
-            numPending++;
-        }
-        else if (m.kind == MSG_PROCESS)
-        {
-            PCB *p = calloc(1, sizeof(PCB));
-            if (p == NULL)
-            {
-                perror("scheduler: out of memory");
-                exit(1);
-            }
-            p->id = m.id;
-            p->arrival = m.arrival;
-            p->runtime = m.runtime;
-            p->priority = p->curPriority = m.priority;
-            p->remaining = m.runtime;
-            p->heapPos = -1;
-            p->heldUse = -1;
-            p->pid = -1;
-            if (numPending > 0)
-            {
-                p->uses = malloc(numPending * sizeof(Usage));
-                if (p->uses == NULL)
-                {
-                    perror("scheduler: out of memory");
-                    exit(1);
-                }
-                for (int i = 0; i < numPending; i++)
-                {
-                    p->uses[i].res = findResource(pending[i].name);
-                    p->uses[i].capture = pending[i].capture;
-                    p->uses[i].release = pending[i].release;
-                }
-                p->numUses = numPending;
-                numPending = 0;
-            }
-            if (numArrivals == capArrivals)
-            {
-                capArrivals = capArrivals ? 2 * capArrivals : 8;
-                arrivals = xrealloc(arrivals, capArrivals * sizeof(PCB *));
-            }
-            arrivals[numArrivals++] = p;
-            totalProcs++;
-        }
-        else    /* MSG_TICK_DONE: everything of this second has been received */
-        {
-            if (m.last)
-                allArrived = true;
+            perror("scheduler: msgrcv (process)");
             break;
         }
+        if (message.processId == pcb->id)
+            break;
     }
-    free(pending);
+    waitpid(pcb->systemPid, NULL, 0);
+    pcb->systemPid = -1;
+    release_process_memory(pcb); /* delete the process data */
 }
 
 /* ------------------------------------------------------------------ */
-/*  One simulated second                                               */
+/*                              Cleanup                                */
 /* ------------------------------------------------------------------ */
 
-/* The running process executes for one more second and its own events happen.
- * Returns true when it left the CPU (blocked or finished). */
-static bool runOneSecond(void)
+static void kill_live_process(PCB *pcb, void *context)
 {
-    PCB *p = running;
-    p->executed++;
-    p->remaining--;
-    *p->remainingShm = p->remaining;
-    sliceLeft--;
-
-    /* a release comes first, then a capture, then the finish */
-    if (p->heldUse >= 0 && p->uses[p->heldUse].release == p->executed)
-        releaseResource(p);
-
-    if (p->nextUse < p->numUses && p->uses[p->nextUse].capture == p->executed)
-    {
-        Resource *r = p->uses[p->nextUse].res;
-        if (r->holder == NULL)
-        {
-            r->holder = p;
-            p->heldUse = p->nextUse++;
-        }
-        else
-        {
-            blockRunning(p, r);
-            return true;
-        }
+    (void)context;
+    if (pcb->systemPid > 0) {
+        kill(pcb->systemPid, SIGKILL);
+        waitpid(pcb->systemPid, NULL, 0);
+        pcb->systemPid = -1;
     }
-
-    if (p->remaining == 0)
-    {
-        finishProcess(p);
-        return true;
-    }
-    return false;
+    release_process_memory(pcb);
 }
 
-static void simulateTick(void)
+static void release_ipc(void)
 {
-    bool cpuVacated = false;       /* the CPU left a process at this very second */
-    bool justDispatched = false;   /* a context switch completed at this second  */
-
-    /* HPF with demotion: the effective priorities depend on the second */
-    if (algorithm == ALGO_HPF_DEMOTION)
-        heapRebuild(&readyHeap);
-
-    /* 0. end of a context switch: the chosen process starts or resumes */
-    if (switchTarget != NULL && now >= switchEnd)
-    {
-        dispatch(switchTarget);
-        switchTarget = NULL;
-        justDispatched = true;
+    if (schedulerInitialized) {
+        scheduler_for_each_live(&scheduler, kill_live_process, NULL);
+        scheduler_destroy(&scheduler);
+        schedulerInitialized = 0;
     }
-
-    /* 1. the running process executed during the last second */
-    if (running != NULL && !justDispatched)
-        cpuVacated = runOneSecond();
-
-    /* 2. arrivals, in id order */
-    for (int i = 0; i < numArrivals; i++)
-        readyPush(arrivals[i]);
-    numArrivals = 0;
-
-    /* 3a. Round Robin: the quantum expired */
-    if (algorithm == ALGO_RR && running != NULL && sliceLeft == 0)
-    {
-        if (!readyEmpty())
-        {
-            preemptRunning();
-            cpuVacated = true;
-        }
-        else
-            sliceLeft = quantum;       /* nobody is waiting: keep going, no log, no switch */
+    if (processQueueId != -1) {
+        msgctl(processQueueId, IPC_RMID, NULL);
+        processQueueId = -1;
     }
-
-    /* 3b. HPF: a strictly higher-priority Ready process preempts the running one */
-    if (isHpf() && running != NULL && !readyEmpty() && (PREEMPT_AT_DISPATCH || !justDispatched))
-    {
-        if (effPriority(readyPeek()) < effPriority(running))
-        {
-            preemptRunning();
-            cpuVacated = true;
-        }
+    if (logFile) {
+        fclose(logFile);
+        logFile = NULL;
     }
-
-    /* 3c. choose the next process.  Moving the CPU directly from one process to
-     * another costs a context switch; an idle CPU starts the process at once. */
-    if (running == NULL && switchTarget == NULL && !readyEmpty())
-    {
-        PCB *next = readyPop();
-        if (cpuVacated && switchTime > 0)
-        {
-            switchTarget = next;
-            switchEnd = now + switchTime;
-        }
-        else
-            dispatch(next);
-    }
+    destroyClk(false);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Output                                                             */
-/* ------------------------------------------------------------------ */
-static void writePerf(void)
-{
-    int utilization = lastFinish > 0 ? (int)(totalRuntime * 100 / lastFinish) : 0;   /* floor */
-    int n = finishedCount;
-    double avgWta = 0, stdWta = 0;
-    int avgWait = 0;
-
-    if (n > 0)
-    {
-        double sum = 0;
-        for (int i = 0; i < n; i++)
-            sum += wtaList[i];
-        avgWta = sum / n;
-        double var = 0;
-        for (int i = 0; i < n; i++)
-            var += (wtaList[i] - avgWta) * (wtaList[i] - avgWta);
-        stdWta = sqrt(var / n);                 /* population standard deviation */
-        avgWait = (int)(totalWait / n);         /* floor */
-    }
-
-    FILE *perf = fopen("scheduler.perf", "w");
-    if (!perf)
-    {
-        perror("scheduler: cannot write scheduler.perf");
-        return;
-    }
-    fprintf(perf, "CPU utilization = %d%%\n", utilization);
-    fprintf(perf, "Avg WTA = %.2f\n", avgWta);
-    fprintf(perf, "Avg Waiting = %d\n", avgWait);
-    fprintf(perf, "Std WTA = %.2f\n", stdWta);
-    fclose(perf);
-}
-
-/* Ctrl-C / SIGTERM: kill the simulated processes and free their memory. */
-static void emergencyCleanup(int signum)
+static void on_interrupt(int signum)
 {
     (void)signum;
-    for (PCB *p = aliveList; p; p = p->nextAlive)
-    {
-        if (p->pid > 0)
-        {
-            kill(p->pid, SIGKILL);           /* SIGKILL also works on stopped processes */
-            waitpid(p->pid, NULL, 0);        /* reap it so it does not stay a zombie */
-        }
-        if (p->shmid > 0)
-            shmctl(p->shmid, IPC_RMID, NULL);
-    }
-    if (logFile)
-        fflush(logFile);
-    _exit(1);
+    release_ipc();
+    exit(1);
 }
 
 /* ------------------------------------------------------------------ */
-/*  main                                                               */
+/*                                Main                                 */
 /* ------------------------------------------------------------------ */
-int main(int argc, char *argv[])
+
+/* Growable buffer for the arrivals of one clock second. */
+typedef struct {
+    ProcessInfo *items;
+    int count;
+    int capacity;
+} ArrivalBuffer;
+
+static void arrival_buffer_add(ArrivalBuffer *buffer, const ProcessInfo *info)
 {
-    if (argc < 4)
-    {
-        fprintf(stderr, "usage: %s <algorithm 1-4> <quantum> <context-switch time>\n", argv[0]);
-        return 1;
+    if (buffer->count == buffer->capacity) {
+        int newCapacity = buffer->capacity ? buffer->capacity * 2 : 8;
+        ProcessInfo *grown = realloc(buffer->items, newCapacity * sizeof(ProcessInfo));
+        if (!grown) {
+            fprintf(stderr, "scheduler: out of memory, dropping process %d\n", info->id);
+            return;
+        }
+        buffer->items = grown;
+        buffer->capacity = newCapacity;
     }
-    algorithm  = atoi(argv[1]);
-    quantum    = atoi(argv[2]);
-    switchTime = atoi(argv[3]);
-    if (algorithm < ALGO_SJF || algorithm > ALGO_HPF_DEMOTION)
-    {
-        fprintf(stderr, "scheduler: unknown algorithm %d\n", algorithm);
-        return 1;
-    }
-    if (algorithm == ALGO_RR)
-    {
-        if (quantum < 1)
-        {
-            fprintf(stderr, "scheduler: Round Robin needs a quantum >= 1\n");
+    buffer->items[buffer->count++] = *info;
+}
+
+/*
+ * Receives all generator messages that belong to clock second `tick`.
+ * Returns 1 when the generator reported that no more processes will come.
+ */
+static int receive_arrivals(int tick, ArrivalBuffer *buffer)
+{
+    GeneratorMessage message;
+    for (;;) {
+        if (msgrcv(generatorQueueId, &message, MESSAGE_SIZE(GeneratorMessage), 0, 0) == -1) {
+            if (errno == EINTR)
+                continue;
+            perror("scheduler: msgrcv (generator)");
             return 1;
         }
-        if (switchTime < 0)
-            switchTime = DEFAULT_SWITCH_TIME;
+        if (message.mtype == MSG_ARRIVAL) {
+            arrival_buffer_add(buffer, &message.process);
+        } else if (message.mtype == MSG_TICK_END && message.tick >= tick) {
+            return message.isLast;
+        }
     }
-    else
-        switchTime = DEFAULT_SWITCH_TIME;    /* fixed at 1 second for SJF and HPF */
+}
 
-    signal(SIGINT, emergencyCleanup);
-    signal(SIGTERM, emergencyCleanup);
+int main(int argc, char *argv[])
+{
+    signal(SIGINT, on_interrupt);
+    signal(SIGTERM, on_interrupt);
+
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <algorithm 1-4> [quantum] [context_switch]\n", argv[0]);
+        return 1;
+    }
+    Algorithm algorithm = (Algorithm)atoi(argv[1]);
+    int quantum = argc > 2 ? atoi(argv[2]) : 1;
+    int contextSwitch = (algorithm == ALGO_RR && argc > 3) ? atoi(argv[3]) : 1;
+    if (algorithm < ALGO_SJF || algorithm > ALGO_HPF_AGING || quantum <= 0 || contextSwitch < 0) {
+        fprintf(stderr, "scheduler: invalid parameters\n");
+        return 1;
+    }
 
     initClk();
 
-    genQueue  = msgget(GEN_QUEUE_KEY, 0666);
-    doneQueue = msgget(DONE_QUEUE_KEY, 0666);
-    if (genQueue == -1 || doneQueue == -1)
-    {
-        perror("scheduler: cannot open the message queues");
+    generatorQueueId = msgget(GENERATOR_MSGQ_KEY, 0666);
+    processQueueId = msgget(PROCESS_MSGQ_KEY, IPC_CREAT | 0666);
+    if (generatorQueueId == -1 || processQueueId == -1) {
+        perror("scheduler: msgget");
+        release_ipc();
         return 1;
     }
 
     logFile = fopen("scheduler.log", "w");
-    if (!logFile)
-    {
-        perror("scheduler: cannot write scheduler.log");
+    if (!logFile) {
+        perror("scheduler: scheduler.log");
+        release_ipc();
         return 1;
     }
-    fprintf(logFile, "#At time x process y state arr w total z remain y wait k\n");
 
-    heapInit(&readyHeap, algorithm == ALGO_SJF ? precedesSjf : precedesHpf);
+    SchedulerHooks hooks = {on_start, on_resume, on_stop, on_execute, on_finish, NULL};
+    if (!scheduler_init(&scheduler, algorithm, quantum, contextSwitch, logFile, &hooks)) {
+        fprintf(stderr, "scheduler: out of memory\n");
+        release_ipc();
+        return 1;
+    }
+    schedulerInitialized = 1;
 
-    /* Main loop: one iteration per clock second until every process has finished. */
-    for (now = 1; ; now++)
-    {
-        while (getClk() < now)
-            usleep(1000);
-        if (!allArrived)
-            receiveArrivals();
-        simulateTick();
-        if (allArrived && finishedCount == totalProcs)
-            break;
+    printf("Scheduler started: %s", algorithm_name(algorithm));
+    if (algorithm == ALGO_RR)
+        printf(" (quantum = %d, context switch = %d)", quantum, contextSwitch);
+    printf("\n");
+    fflush(stdout);
+
+    ArrivalBuffer arrivals = {NULL, 0, 0};
+    int simulationTime = 0;  /* last clock second fully processed */
+    int generatorDone = 0;
+
+    while (!generatorDone || !scheduler_is_idle(&scheduler)) {
+        if (simulationTime >= getClk()) {
+            usleep(1000); /* wait for the next clock tick */
+            continue;
+        }
+        /* Process every elapsed second in order (catches up if we lagged). */
+        simulationTime++;
+        arrivals.count = 0;
+        if (!generatorDone)
+            generatorDone = receive_arrivals(simulationTime, &arrivals);
+        scheduler_tick(&scheduler, simulationTime, arrivals.items, arrivals.count);
     }
 
-    fclose(logFile);
-    logFile = NULL;
-    writePerf();
-
-    /* free memory */
-    free(readyHeap.items);
-    free(arrivals);
-    free(wtaList);
-    for (int i = 0; i < numRes; i++)
-    {
-        free(resTable[i]->waiters);
-        free(resTable[i]);
+    FILE *perfFile = fopen("scheduler.perf", "w");
+    if (perfFile) {
+        scheduler_write_perf(&scheduler, perfFile);
+        fclose(perfFile);
     }
-    free(resTable);
+    scheduler_write_perf(&scheduler, stdout);
+    printf("Scheduler finished at time %d\n", simulationTime);
 
-    destroyClk(false);   /* the generator terminates the clock and removes the queues */
+    free(arrivals.items);
+    release_ipc();
     return 0;
 }
