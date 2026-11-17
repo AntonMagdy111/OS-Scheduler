@@ -36,14 +36,14 @@ static void remove_stale_clock(void)
 /* Clear all IPC resources and child processes, then exit. */
 void clearResources(int signum)
 {
-    (void)signum;
     if (schedulerPid > 0) {
         kill(schedulerPid, SIGINT);
         waitpid(schedulerPid, NULL, 0);
         schedulerPid = -1;
     }
     if (clockPid > 0) {
-        kill(clockPid, SIGINT);
+        if (signum != SIGINT)
+            kill(clockPid, SIGINT);
         waitpid(clockPid, NULL, 0);
         clockPid = -1;
     }
@@ -167,7 +167,6 @@ int main(int argc, char *argv[])
     /* 4. Initiate and create the clock and scheduler processes */
     char *clockArguments[] = {"clk.out", NULL};
     clockPid = spawn("./clk.out", clockArguments);
-    initClk();
 
     char algorithmText[16], quantumText[16], switchText[16];
     snprintf(algorithmText, sizeof algorithmText, "%d", algorithm);
@@ -175,6 +174,10 @@ int main(int argc, char *argv[])
     snprintf(switchText, sizeof switchText, "%d", contextSwitch);
     char *schedulerArguments[] = {"scheduler.out", algorithmText, quantumText, switchText, NULL};
     schedulerPid = spawn("./scheduler.out", schedulerArguments);
+
+    while (shmget(SHKEY, 4, 0444) == -1)
+        usleep(5000);
+    initClk();
 
     /* 5. Send each process to the scheduler when it arrives. After the
      *    arrivals of each second, a TICK_END message tells the scheduler that

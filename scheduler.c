@@ -104,17 +104,12 @@ static void on_finish(PCB *pcb, void *context)
     if (pcb->systemPid <= 0)
         return;
     ProcessMessage message;
-    for (;;) {
-        ssize_t received = msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
-                                  MSG_PROCESS_FINISHED, 0);
-        if (received == -1) {
-            if (errno == EINTR)
-                continue;
-            perror("scheduler: msgrcv (process)");
-            break;
-        }
-        if (message.processId == pcb->id)
-            break;
+    while (msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
+                  pcb->id, 0) == -1) {
+        if (errno == EINTR)
+            continue;
+        perror("scheduler: msgrcv (process)");
+        break;
     }
     waitpid(pcb->systemPid, NULL, 0);
     pcb->systemPid = -1;
@@ -226,6 +221,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    while (shmget(SHKEY, 4, 0444) == -1)
+        usleep(5000);
     initClk();
 
     generatorQueueId = msgget(GENERATOR_MSGQ_KEY, 0666);

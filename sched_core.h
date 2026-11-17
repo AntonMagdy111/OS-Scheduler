@@ -51,6 +51,7 @@ typedef struct {
     int quantumEnd;   /* RR: time at which the running quantum expires */
     int switching;    /* 1 while a context switch is in progress       */
     int switchEnd;    /* time the context switch completes             */
+    PCB *switchTarget;/* process chosen to run after the switch        */
     int cpuReleasedAt;/* last time a process left the CPU              */
 
     /* ready structures */

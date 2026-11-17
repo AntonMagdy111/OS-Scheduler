@@ -316,8 +316,8 @@ static void finish_running(Scheduler *s, int now)
     if (pcb->heldResource) /* cannot happen with valid input */
         release_resource(s, pcb, now);
     pcb->state = STATE_FINISHED;
+    call_hook(s->hooks.onFinish, pcb, s->hooks.context); /* wait for process termination notice first */
     log_event(s, pcb, "finished", now);
-    call_hook(s->hooks.onFinish, pcb, s->hooks.context); /* waits for the process notice */
     record_finish_statistics(s, pcb, now);
     s->running = NULL;
     s->cpuReleasedAt = now;
@@ -356,18 +356,17 @@ static void advance_running(Scheduler *s, int now)
 }
 
 /* Picks the next process when the CPU is free. A process leaving the CPU at
- * this very second means a context switch; an idle CPU dispatches at once.
- * During a context switch the next process stays in the ready structure so that
- * any arrivals or priority aging up to switchEnd are accounted for cleanly. */
+ * this very second means a context switch; an idle CPU dispatches at once. */
 static void choose_next(Scheduler *s, int now)
 {
     if (s->running || s->switching || ready_is_empty(s))
         return;
+    PCB *next = ready_pop(s);
     if (s->cpuReleasedAt == now && s->contextSwitchTime > 0) {
         s->switching = 1;
+        s->switchTarget = next; /* stays Ready (keeps aging) until dispatched */
         s->switchEnd = now + s->contextSwitchTime;
     } else {
-        PCB *next = ready_pop(s);
         dispatch(s, next, now);
     }
 }
@@ -437,9 +436,14 @@ void scheduler_tick(Scheduler *s, int now, const ProcessInfo *arrivals, int arri
         }
     }
 
-    /* 3a. a context switch that ends now frees the CPU for selection */
-    if (s->switching && now >= s->switchEnd)
+    /* 3a. a context switch that ends now dispatches its chosen target */
+    int justDispatched = 0;
+    if (s->switching && now >= s->switchEnd) {
         s->switching = 0;
+        dispatch(s, s->switchTarget, now);
+        s->switchTarget = NULL;
+        justDispatched = 1;
+    }
 
     if (s->algorithm == ALGO_HPF_AGING)
         refresh_aged_priorities(s, now);
@@ -451,7 +455,7 @@ void scheduler_tick(Scheduler *s, int now, const ProcessInfo *arrivals, int arri
                 s->quantumEnd = now + s->quantum; /* keeps running, no log */
             else
                 preempt_running(s, now);
-        } else if (is_hpf(s) && !ready_is_empty(s) &&
+        } else if (is_hpf(s) && !justDispatched && !ready_is_empty(s) &&
                    ready_peek(s)->priorityKey < running_priority(s->running)) {
             preempt_running(s, now);
         }

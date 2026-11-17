@@ -39,13 +39,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* CPU-bound work: spin while there is remaining time */
+    /* CPU-bound work: run while there is remaining time (1ms sleep avoids
+     * starving clk.out and scheduler.out on a 1-CPU machine). */
     while ((remainingtime = *sharedRemaining) > 0) {
+        usleep(1000);
     }
 
     /* notify the scheduler of the termination */
     ProcessMessage message;
-    message.mtype = MSG_PROCESS_FINISHED;
+    message.mtype = processId;
     message.processId = processId;
     message.systemPid = getpid();
     while (msgsnd(queueId, &message, MESSAGE_SIZE(ProcessMessage), 0) == -1 && errno == EINTR) {
