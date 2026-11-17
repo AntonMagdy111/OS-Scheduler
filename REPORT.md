@@ -25,12 +25,16 @@ Every clock tick `now` processes events in the specified order:
 | Test Case | Algorithm | CPU Utilization | Avg WTA | Avg Waiting | Std WTA |
 |---|---|---:|---:|---:|---:|
 | `sjf_example` | SJF (1) | 78% | 3.06 | 6 | 1.20 |
+| `sjf_ties_arrival_and_id` | SJF (1) | 76% | 3.73 | 7 | 1.72 |
 | `rr_example` | RR (2, q=3, cs=1) | 68% | 5.59 | 10 | 3.30 |
 | `rr_quantum_continuation` | RR (2, q=3, cs=1) | 58% | 1.00 | 0 | 0.00 |
+| `rr_arrival_and_switch_order` | RR (2, q=2, cs=2) | 53% | 3.33 | 5 | 1.55 |
 | `hpf_output_example` | HPF (3, cs=1) | 75% | 1.58 | 3 | 0.25 |
 | `hpf_inheritance_example` | HPF (3, cs=1) | 65% | 3.31 | 10 | 0.32 |
+| `hpf_multi_waiters_and_chained_resources` | HPF (3, cs=1) | 63% | 3.78 | 10 | 0.68 |
 | `hpf_plain_on_aging_input` | HPF (3, cs=1) | 90% | 3.11 | 13 | 2.63 |
 | `hpf_aging_example` | HPF-Aging (4, cs=1) | 88% | 3.20 | 15 | 2.69 |
+| `hpf_aging_switch_tie` | HPF-Aging (4, cs=1) | 88% | 6.01 | 22 | 3.68 |
 
 ### Comparison: Plain HPF (Algorithm 3) vs. HPF with Priority Demotion (Algorithm 4)
 
