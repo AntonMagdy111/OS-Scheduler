@@ -1,12 +1,13 @@
 CORE = sched_core.c data_structures.c resource.c input.c
+CFLAGS = -std=gnu17
 
 build:
-	gcc process_generator.c input.c -o process_generator.out
-	gcc clk.c -o clk.out
-	gcc scheduler.c $(CORE) -o scheduler.out -lm
-	gcc process.c -o process.out
-	gcc test_generator.c -o test_generator.out
-	gcc sim.c $(CORE) -o sim.out -lm
+	gcc $(CFLAGS) process_generator.c input.c -o process_generator.out
+	gcc $(CFLAGS) clk.c -o clk.out
+	gcc $(CFLAGS) scheduler.c $(CORE) -o scheduler.out -lm
+	gcc $(CFLAGS) process.c -o process.out
+	gcc $(CFLAGS) test_generator.c -o test_generator.out
+	gcc $(CFLAGS) sim.c $(CORE) -o sim.out -lm
 
 clean:
 	rm -f *.out scheduler.log scheduler.perf
