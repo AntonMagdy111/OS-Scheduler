@@ -1,0 +1,1 @@
+Processes finishing exactly at the end of their quantum

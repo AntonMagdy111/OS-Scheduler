@@ -1,0 +1,1 @@
+SJF with idle gaps and a process arriving as another finishes

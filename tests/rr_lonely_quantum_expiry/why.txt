@@ -1,0 +1,1 @@
+One process outlives many quanta with an empty ready queue; a latecomer arrives exactly on a quantum boundary

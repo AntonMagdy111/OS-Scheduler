@@ -1,0 +1,1 @@
+CPU idle for 9 seconds, then gaps between bursts

@@ -1,0 +1,1 @@
+P1 (prio 9) holds x for 9s; P2,P3,P4 block on x (P3/P4 tie on priority+arrival -> smaller id first); medium-priority P5 must NOT run before the boosted holder

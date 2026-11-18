@@ -1,0 +1,1 @@
+RR quantum 4, context switch 0; arrivals on quantum and switch boundaries

@@ -1,0 +1,1 @@
+P1 releases x and captures y in the same second while higher-priority waiters sit on both

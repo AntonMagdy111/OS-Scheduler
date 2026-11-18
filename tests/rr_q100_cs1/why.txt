@@ -1,0 +1,1 @@
+RR quantum 100, context switch 1; arrivals on quantum and switch boundaries

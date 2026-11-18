@@ -1,0 +1,1 @@
+Four low-priority holders on four different resources; four high-priority processes block on them; each holder inherits a different priority
