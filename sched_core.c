@@ -18,6 +18,23 @@
 #define AGING_START 20 /* seconds of Ready waiting before the first bonus */
 #define AGING_STEP 5   /* one more bonus level every AGING_STEP seconds   */
 
+/*
+ * Compile-time switches for the TA edge case where a higher-priority process
+ * arrives or ages in the exact second a context switch ends:
+ *   - Default (both 0): target is chosen when the switch begins, dispatched
+ *     when the switch ends, and runs at least 1 second before preemption.
+ *   - -DPREEMPT_AT_DISPATCH=1: target is dispatched at switchEnd and may be
+ *     immediately preempted at the same second (logged started + stopped).
+ *   - -DCHOOSE_AT_SWITCH_END=1: target is popped from Ready at switchEnd
+ *     (after arrivals and aging at switchEnd).
+ */
+#ifndef PREEMPT_AT_DISPATCH
+#define PREEMPT_AT_DISPATCH 0
+#endif
+#ifndef CHOOSE_AT_SWITCH_END
+#define CHOOSE_AT_SWITCH_END 0
+#endif
+
 /* ------------------------------------------------------------------ */
 /*                           Small helpers                             */
 /* ------------------------------------------------------------------ */
@@ -361,12 +378,12 @@ static void choose_next(Scheduler *s, int now)
 {
     if (s->running || s->switching || ready_is_empty(s))
         return;
-    PCB *next = ready_pop(s);
     if (s->cpuReleasedAt == now && s->contextSwitchTime > 0) {
         s->switching = 1;
-        s->switchTarget = next; /* stays Ready (keeps aging) until dispatched */
+        s->switchTarget = CHOOSE_AT_SWITCH_END ? NULL : ready_pop(s);
         s->switchEnd = now + s->contextSwitchTime;
     } else {
+        PCB *next = ready_pop(s);
         dispatch(s, next, now);
     }
 }
@@ -440,9 +457,11 @@ void scheduler_tick(Scheduler *s, int now, const ProcessInfo *arrivals, int arri
     int justDispatched = 0;
     if (s->switching && now >= s->switchEnd) {
         s->switching = 0;
-        dispatch(s, s->switchTarget, now);
-        s->switchTarget = NULL;
-        justDispatched = 1;
+        if (s->switchTarget) {
+            dispatch(s, s->switchTarget, now);
+            s->switchTarget = NULL;
+            justDispatched = 1;
+        }
     }
 
     if (s->algorithm == ALGO_HPF_AGING)
@@ -455,7 +474,8 @@ void scheduler_tick(Scheduler *s, int now, const ProcessInfo *arrivals, int arri
                 s->quantumEnd = now + s->quantum; /* keeps running, no log */
             else
                 preempt_running(s, now);
-        } else if (is_hpf(s) && !justDispatched && !ready_is_empty(s) &&
+        } else if (is_hpf(s) && (PREEMPT_AT_DISPATCH || !justDispatched) &&
+                   !ready_is_empty(s) &&
                    ready_peek(s)->priorityKey < running_priority(s->running)) {
             preempt_running(s, now);
         }
