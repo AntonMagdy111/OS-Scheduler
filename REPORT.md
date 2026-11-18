@@ -52,6 +52,7 @@ Only assumptions specified in the project document are used:
 - Priority values are in `[0, 10]` (`0` highest, `10` lowest); equal-priority processes do not preempt the running process and tie-break by smaller `id`.
 - Each resource entry satisfies `1 <= capture < release <= runtime`, intervals for the same process do not overlap, and a process holds at most one resource at a time.
 - CPU utilization and Avg Waiting are floored to integers; WTA, Avg WTA, and Std WTA (population standard deviation) are rounded to 2 decimal places.
+- **Arrival / Aging at Context-Switch End (HPF family)**: When a context switch completes at second $t$, the target process chosen when the switch began is dispatched at $t$ and runs for at least 1 second before any newcomer arriving at $t$ can preempt it (avoiding `started` and `stopped` log lines at the identical timestamp $t$). If the TA prefers immediate 0-second preemption at $t$ or choosing the target at the end of the switch, `sched_core.c` supports `-DPREEMPT_AT_DISPATCH=1` and `-DCHOOSE_AT_SWITCH_END=1` at compile time.
 
 ## 4. Workload Distribution & Time Log
 
