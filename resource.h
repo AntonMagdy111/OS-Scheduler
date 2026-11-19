@@ -14,7 +14,7 @@
 #define RESOURCE_BUCKETS 64
 
 typedef struct Resource {
-    char name[MAX_RESOURCE_NAME];
+    char *name;                   /* heap-allocated resource name         */
     PCB *holder;                  /* process holding it, NULL if free     */
     PCB *waiters;                 /* blocked processes, best first        */
     struct Resource *nextInBucket;

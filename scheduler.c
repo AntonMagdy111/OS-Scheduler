@@ -3,13 +3,12 @@
  * The scheduler process: connects the scheduling engine (sched_core.c) to
  * the real system.
  *
- *  - Receives arriving processes from the process generator (message queue).
- *    For every clock second the generator sends the arrivals of that second
- *    followed by a TICK_END message, so the scheduler never misses or
- *    reorders an arrival.
+ *  - Receives arriving processes (and streamed resource requests) from the
+ *    process generator via System V message queue.
  *  - Forks process.out on first dispatch, SIGSTOP/SIGCONT to switch.
  *  - Keeps each process's remaining time in a private shared memory segment.
- *  - Waits for the process's own termination message (it never kills it).
+ *  - Waits for the process's own termination message without hanging if a
+ *    worker exits unexpectedly, and cleans up all IPC on failure or exit.
  *  - Writes scheduler.log and scheduler.perf.
  *
  * Usage (normally launched by process_generator.out):
@@ -23,6 +22,7 @@ static int schedulerInitialized = 0;
 static int generatorQueueId = -1;
 static int processQueueId = -1;
 static FILE *logFile = NULL;
+static int fatalError = 0;
 
 /* ------------------------------------------------------------------ */
 /*                    OS hooks called by the engine                    */
@@ -47,12 +47,14 @@ static void on_start(PCB *pcb, void *context)
     pcb->sharedMemoryId = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);
     if (pcb->sharedMemoryId == -1) {
         perror("scheduler: shmget");
+        fatalError = 1;
         return;
     }
     int *remaining = (int *)shmat(pcb->sharedMemoryId, NULL, 0);
     if ((long)remaining == -1) {
         perror("scheduler: shmat");
         release_process_memory(pcb);
+        fatalError = 1;
         return;
     }
     *remaining = pcb->runtime - pcb->executedTime;
@@ -61,6 +63,8 @@ static void on_start(PCB *pcb, void *context)
     pid_t pid = fork();
     if (pid == -1) {
         perror("scheduler: fork");
+        release_process_memory(pcb);
+        fatalError = 1;
         return;
     }
     if (pid == 0) {
@@ -97,21 +101,60 @@ static void on_execute(PCB *pcb, void *context)
         *pcb->sharedRemainingTime = pcb->runtime - pcb->executedTime;
 }
 
-/* Remaining time reached 0: wait until the process notifies us, then reap it. */
+/*
+ * Remaining time reached 0: wait until the worker sends its termination
+ * notice, while polling waitpid(WNOHANG) so an unexpected worker crash or
+ * exec failure can never hang the scheduler forever.
+ */
 static void on_finish(PCB *pcb, void *context)
 {
     (void)context;
-    if (pcb->systemPid <= 0)
+    if (pcb->systemPid <= 0) {
+        fprintf(stderr, "scheduler: process %d has no live worker\n", pcb->id);
+        fatalError = 1;
+        release_process_memory(pcb);
         return;
+    }
+
     ProcessMessage message;
-    while (msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
-                  pcb->id, 0) == -1) {
+    int reaped = 0;
+    for (;;) {
+        ssize_t r = msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
+                           pcb->id, IPC_NOWAIT);
+        if (r != -1)
+            break;
         if (errno == EINTR)
             continue;
-        perror("scheduler: msgrcv (process)");
-        break;
+        if (errno != ENOMSG) {
+            perror("scheduler: msgrcv (process)");
+            fatalError = 1;
+            break;
+        }
+        int wstatus = 0;
+        pid_t wp = waitpid(pcb->systemPid, &wstatus, WNOHANG);
+        if (wp == pcb->systemPid) {
+            /* One final non-blocking check in case the notice arrived right before exit. */
+            if (msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
+                       pcb->id, IPC_NOWAIT) == -1) {
+                fprintf(stderr, "scheduler: worker for process %d exited before notifying completion\n",
+                        pcb->id);
+                fatalError = 1;
+            }
+            reaped = 1;
+            break;
+        }
+        if (wp == -1 && errno != EINTR) {
+            perror("scheduler: waitpid");
+            fatalError = 1;
+            break;
+        }
+        usleep(1000);
     }
-    waitpid(pcb->systemPid, NULL, 0);
+
+    if (!reaped) {
+        while (waitpid(pcb->systemPid, NULL, 0) == -1 && errno == EINTR) {
+        }
+    }
     pcb->systemPid = -1;
     release_process_memory(pcb); /* delete the process data */
 }
@@ -125,7 +168,8 @@ static void kill_live_process(PCB *pcb, void *context)
     (void)context;
     if (pcb->systemPid > 0) {
         kill(pcb->systemPid, SIGKILL);
-        waitpid(pcb->systemPid, NULL, 0);
+        while (waitpid(pcb->systemPid, NULL, 0) == -1 && errno == EINTR) {
+        }
         pcb->systemPid = -1;
     }
     release_process_memory(pcb);
@@ -167,19 +211,56 @@ typedef struct {
     int capacity;
 } ArrivalBuffer;
 
-static void arrival_buffer_add(ArrivalBuffer *buffer, const ProcessInfo *info)
+static void arrival_buffer_clear(ArrivalBuffer *buffer)
+{
+    for (int i = 0; i < buffer->count; i++)
+        free_process_resources(&buffer->items[i]);
+    buffer->count = 0;
+}
+
+static void arrival_buffer_free(ArrivalBuffer *buffer)
+{
+    arrival_buffer_clear(buffer);
+    free(buffer->items);
+    buffer->items = NULL;
+    buffer->capacity = 0;
+}
+
+static int arrival_buffer_add(ArrivalBuffer *buffer, ProcessInfo *info)
 {
     if (buffer->count == buffer->capacity) {
         int newCapacity = buffer->capacity ? buffer->capacity * 2 : 8;
-        ProcessInfo *grown = realloc(buffer->items, newCapacity * sizeof(ProcessInfo));
+        ProcessInfo *grown = realloc(buffer->items, (size_t)newCapacity * sizeof(ProcessInfo));
         if (!grown) {
             fprintf(stderr, "scheduler: out of memory, dropping process %d\n", info->id);
-            return;
+            free_process_resources(info);
+            return 0;
         }
         buffer->items = grown;
         buffer->capacity = newCapacity;
     }
-    buffer->items[buffer->count++] = *info;
+    buffer->items[buffer->count++] = *info; /* takes ownership of info->resources */
+    memset(info, 0, sizeof *info);
+    return 1;
+}
+
+/* Appends `chunk` to a dynamically growing string buffer. */
+static int append_name_chunk(char **nameBuf, size_t *nameLen, size_t *nameCap, const char *chunk)
+{
+    size_t add = strlen(chunk);
+    if (*nameLen + add + 1 > *nameCap) {
+        size_t newCap = *nameCap ? *nameCap * 2 : 64;
+        while (newCap < *nameLen + add + 1)
+            newCap *= 2;
+        char *grown = realloc(*nameBuf, newCap);
+        if (!grown)
+            return 0;
+        *nameBuf = grown;
+        *nameCap = newCap;
+    }
+    memcpy(*nameBuf + *nameLen, chunk, add + 1);
+    *nameLen += add;
+    return 1;
 }
 
 /*
@@ -189,16 +270,52 @@ static void arrival_buffer_add(ArrivalBuffer *buffer, const ProcessInfo *info)
 static int receive_arrivals(int tick, ArrivalBuffer *buffer)
 {
     GeneratorMessage message;
+    ProcessInfo pending;
+    memset(&pending, 0, sizeof pending);
+    char *nameBuf = NULL;
+    size_t nameLen = 0, nameCap = 0;
+
     for (;;) {
         if (msgrcv(generatorQueueId, &message, MESSAGE_SIZE(GeneratorMessage), 0, 0) == -1) {
             if (errno == EINTR)
                 continue;
             perror("scheduler: msgrcv (generator)");
+            free(nameBuf);
+            free_process_resources(&pending);
+            fatalError = 1;
             return 1;
         }
-        if (message.mtype == MSG_ARRIVAL) {
-            arrival_buffer_add(buffer, &message.process);
+        if (message.mtype == MSG_RESOURCE) {
+            message.resourceChunk[IPC_NAME_CHUNK - 1] = '\0';
+            if (!append_name_chunk(&nameBuf, &nameLen, &nameCap, message.resourceChunk)) {
+                fprintf(stderr, "scheduler: out of memory assembling resource name\n");
+                free(nameBuf);
+                free_process_resources(&pending);
+                fatalError = 1;
+                return 1;
+            }
+            if (!message.moreChunks) {
+                if (!process_add_resource(&pending, nameBuf, message.captureTime, message.releaseTime)) {
+                    fprintf(stderr, "scheduler: out of memory storing resource request\n");
+                    free(nameBuf);
+                    free_process_resources(&pending);
+                    fatalError = 1;
+                    return 1;
+                }
+                nameLen = 0;
+                if (nameBuf)
+                    nameBuf[0] = '\0';
+            }
+        } else if (message.mtype == MSG_ARRIVAL) {
+            pending.id = message.id;
+            pending.arrival = message.arrival;
+            pending.runtime = message.runtime;
+            pending.priority = message.priority;
+            if (!arrival_buffer_add(buffer, &pending))
+                fatalError = 1;
         } else if (message.mtype == MSG_TICK_END && message.tick >= tick) {
+            free(nameBuf);
+            free_process_resources(&pending);
             return message.isLast;
         }
     }
@@ -258,28 +375,45 @@ int main(int argc, char *argv[])
     int simulationTime = 0;  /* last clock second fully processed */
     int generatorDone = 0;
 
-    while (!generatorDone || !scheduler_is_idle(&scheduler)) {
+    while (!fatalError && (!generatorDone || !scheduler_is_idle(&scheduler))) {
         if (simulationTime >= getClk()) {
             usleep(1000); /* wait for the next clock tick */
             continue;
         }
         /* Process every elapsed second in order (catches up if we lagged). */
         simulationTime++;
-        arrivals.count = 0;
+        arrival_buffer_clear(&arrivals);
         if (!generatorDone)
             generatorDone = receive_arrivals(simulationTime, &arrivals);
-        scheduler_tick(&scheduler, simulationTime, arrivals.items, arrivals.count);
+        if (!fatalError)
+            scheduler_tick(&scheduler, simulationTime, arrivals.items, arrivals.count);
+        arrival_buffer_clear(&arrivals);
+    }
+
+    arrival_buffer_free(&arrivals);
+
+    if (fatalError) {
+        fprintf(stderr, "scheduler: aborting due to fatal IPC or process error\n");
+        release_ipc();
+        return 1;
     }
 
     FILE *perfFile = fopen("scheduler.perf", "w");
-    if (perfFile) {
-        scheduler_write_perf(&scheduler, perfFile);
-        fclose(perfFile);
+    if (!perfFile) {
+        perror("scheduler: scheduler.perf");
+        release_ipc();
+        return 1;
     }
+    scheduler_write_perf(&scheduler, perfFile);
+    if (fclose(perfFile) != 0) {
+        perror("scheduler: closing scheduler.perf");
+        release_ipc();
+        return 1;
+    }
+
     scheduler_write_perf(&scheduler, stdout);
     printf("Scheduler finished at time %d\n", simulationTime);
 
-    free(arrivals.items);
     release_ipc();
     return 0;
 }

@@ -32,6 +32,7 @@ Every clock tick `now` processes events in the specified order:
 | `hpf_output_example` | HPF (3, cs=1) | 75% | 1.58 | 3 | 0.25 |
 | `hpf_inheritance_example` | HPF (3, cs=1) | 65% | 3.31 | 10 | 0.32 |
 | `hpf_multi_waiters_and_chained_resources` | HPF (3, cs=1) | 63% | 3.78 | 10 | 0.68 |
+| `hpf_many_and_long_resources` | HPF (3, cs=1) | 81% | 3.05 | 9 | 1.30 |
 | `hpf_plain_on_aging_input` | HPF (3, cs=1) | 90% | 3.11 | 13 | 2.63 |
 | `hpf_aging_example` | HPF-Aging (4, cs=1) | 88% | 3.20 | 15 | 2.69 |
 | `hpf_aging_switch_tie` | HPF-Aging (4, cs=1) | 88% | 6.01 | 22 | 3.68 |

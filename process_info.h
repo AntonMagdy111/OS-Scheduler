@@ -1,20 +1,20 @@
 /*
  * process_info.h
  * Plain description of a process as read from the input files.
- * This header is portable (no Linux-specific includes) so it is shared by
- * the process generator, the scheduler and the offline simulator.
+ * Portable header (no Linux-specific includes) shared by the process
+ * generator, the scheduler, and the offline simulator.
+ *
+ * Resource names and per-process resource lists are dynamically allocated so
+ * there are no fixed limits on name length or number of requests per process.
  */
 #ifndef PROCESS_INFO_H
 #define PROCESS_INFO_H
 
-#define MAX_RESOURCE_NAME 16          /* max length of a resource id (incl. '\0') */
-#define MAX_RESOURCES_PER_PROCESS 16  /* max resources.txt lines per process      */
-
-/* One line of resources.txt (already attached to its process). */
+/* One line of resources.txt (attached to its process). */
 typedef struct {
-    char name[MAX_RESOURCE_NAME]; /* resource id, e.g. "x"                     */
-    int captureTime;              /* executed time at which it is captured      */
-    int releaseTime;              /* executed time at which it is released      */
+    char *name;      /* heap-allocated resource id, e.g. "x"             */
+    int captureTime; /* executed time at which it is captured            */
+    int releaseTime; /* executed time at which it is released            */
 } ResourceRequest;
 
 /* One line of processes.txt plus the resources it uses. */
@@ -24,11 +24,24 @@ typedef struct {
     int runtime;
     int priority;
     int resourceCount;
-    ResourceRequest resources[MAX_RESOURCES_PER_PROCESS];
+    int resourceCapacity;
+    ResourceRequest *resources;
 } ProcessInfo;
 
 /*
- * Reads processes.txt. Allocates *outList (caller frees).
+ * Appends a resource request to `process` (duplicating `name`).
+ * Returns 1 on success, 0 on allocation failure.
+ */
+int process_add_resource(ProcessInfo *process, const char *name, int captureTime, int releaseTime);
+
+/* Frees all dynamically allocated resources attached to one ProcessInfo. */
+void free_process_resources(ProcessInfo *process);
+
+/* Frees an array of ProcessInfo structs and all attached resource data. */
+void free_processes(ProcessInfo *list, int count);
+
+/*
+ * Reads processes.txt. Allocates *outList (caller frees via free_processes).
  * Returns the number of processes, or -1 if the file cannot be opened.
  * The list is sorted by (arrival, id).
  */

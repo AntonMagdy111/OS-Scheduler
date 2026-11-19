@@ -47,12 +47,18 @@ int main(int argc, char *argv[])
     FILE *perfFile = fopen(perfPath, "w");
     if (!logFile || !perfFile) {
         fprintf(stderr, "Cannot create output files\n");
+        if (logFile) fclose(logFile);
+        if (perfFile) fclose(perfFile);
+        free_processes(processes, count);
         return 1;
     }
 
     Scheduler scheduler;
     if (!scheduler_init(&scheduler, algorithm, quantum, contextSwitch, logFile, NULL)) {
         fprintf(stderr, "Out of memory\n");
+        fclose(logFile);
+        fclose(perfFile);
+        free_processes(processes, count);
         return 1;
     }
 
@@ -68,6 +74,6 @@ int main(int argc, char *argv[])
     scheduler_destroy(&scheduler);
     fclose(logFile);
     fclose(perfFile);
-    free(processes);
+    free_processes(processes, count);
     return 0;
 }

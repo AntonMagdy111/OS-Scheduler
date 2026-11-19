@@ -201,19 +201,31 @@ static PCB *create_pcb(Scheduler *s, const ProcessInfo *info)
     pcb->systemPid = -1;
     pcb->sharedMemoryId = -1;
 
-    if (s->usesResources && info->resourceCount > 0) {
-        ProcessInfo normalized = *info; /* defensive re-validation */
-        normalize_resource_requests(&normalized);
-        pcb->resourceUses = calloc(normalized.resourceCount, sizeof(ResourceUse));
-        if (pcb->resourceUses) {
-            for (int i = 0; i < normalized.resourceCount; i++) {
-                pcb->resourceUses[i].resource =
-                    resource_table_get(&s->resources, normalized.resources[i].name);
-                pcb->resourceUses[i].captureTime = normalized.resources[i].captureTime;
-                pcb->resourceUses[i].releaseTime = normalized.resources[i].releaseTime;
-            }
-            pcb->resourceUseCount = normalized.resourceCount;
+    if (s->usesResources && info->resourceCount > 0 && info->resources != NULL) {
+        ProcessInfo normalized;
+        memset(&normalized, 0, sizeof normalized);
+        normalized.id = info->id;
+        normalized.runtime = info->runtime;
+        for (int i = 0; i < info->resourceCount; i++) {
+            if (info->resources[i].name)
+                process_add_resource(&normalized, info->resources[i].name,
+                                     info->resources[i].captureTime,
+                                     info->resources[i].releaseTime);
         }
+        normalize_resource_requests(&normalized);
+        if (normalized.resourceCount > 0) {
+            pcb->resourceUses = calloc((size_t)normalized.resourceCount, sizeof(ResourceUse));
+            if (pcb->resourceUses) {
+                for (int i = 0; i < normalized.resourceCount; i++) {
+                    pcb->resourceUses[i].resource =
+                        resource_table_get(&s->resources, normalized.resources[i].name);
+                    pcb->resourceUses[i].captureTime = normalized.resources[i].captureTime;
+                    pcb->resourceUses[i].releaseTime = normalized.resources[i].releaseTime;
+                }
+                pcb->resourceUseCount = normalized.resourceCount;
+            }
+        }
+        free_process_resources(&normalized);
     }
 
     /* insert into the live list */

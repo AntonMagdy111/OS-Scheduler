@@ -27,6 +27,7 @@ void resource_table_free(ResourceTable *table)
         Resource *current = table->buckets[i];
         while (current) {
             Resource *next = current->nextInBucket;
+            free(current->name);
             free(current);
             current = next;
         }
@@ -44,7 +45,13 @@ Resource *resource_table_get(ResourceTable *table, const char *name)
     Resource *created = calloc(1, sizeof(Resource));
     if (!created)
         return NULL;
-    strncpy(created->name, name, MAX_RESOURCE_NAME - 1);
+    size_t len = strlen(name);
+    created->name = malloc(len + 1);
+    if (!created->name) {
+        free(created);
+        return NULL;
+    }
+    memcpy(created->name, name, len + 1);
     created->nextInBucket = table->buckets[bucket];
     table->buckets[bucket] = created;
     return created;

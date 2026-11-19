@@ -35,13 +35,23 @@ typedef short bool;
 #define MSG_ARRIVAL 1          /* a process arrives at msg.tick         */
 #define MSG_TICK_END 2         /* all arrivals of msg.tick were sent    */
 #define MSG_PROCESS_FINISHED 3 /* a process notifies its termination    */
+#define MSG_RESOURCE 4         /* one resource entry (or name chunk)    */
+
+#define IPC_NAME_CHUNK 256
 
 /* process_generator -> scheduler */
 typedef struct {
     long mtype;
-    int tick;       /* clock second this message belongs to             */
-    int isLast;     /* MSG_TICK_END: no more processes will be sent     */
-    ProcessInfo process;
+    int tick;        /* clock second this message belongs to          */
+    int isLast;      /* MSG_TICK_END: no more processes will be sent  */
+    int id;          /* MSG_ARRIVAL: process id                       */
+    int arrival;     /* MSG_ARRIVAL: arrival time                     */
+    int runtime;     /* MSG_ARRIVAL: runtime                          */
+    int priority;    /* MSG_ARRIVAL: original priority                */
+    int captureTime; /* MSG_RESOURCE: capture executed time           */
+    int releaseTime; /* MSG_RESOURCE: release executed time           */
+    int moreChunks;  /* MSG_RESOURCE: 1 if resource name continues    */
+    char resourceChunk[IPC_NAME_CHUNK];
 } GeneratorMessage;
 
 /* process -> scheduler */
