@@ -19,3 +19,6 @@ run:
 
 test: sim.out
 	bash tests/run_tests.sh
+
+test-ipc: build
+	bash tests/run_tests.sh --ipc --quick

@@ -1,19 +1,40 @@
 #!/bin/bash
-# Regression tests: runs every case in tests/<case>/ and compares the output
+# Regression tests: runs test cases in tests/<case>/ and compares the output
 # with expected.log / expected.perf.
-#   bash tests/run_tests.sh          -> fast, uses sim.out (same engine, no IPC)
-#   bash tests/run_tests.sh --ipc    -> full system (process_generator.out, real clock)
+#   bash tests/run_tests.sh                    -> fast, all 46 cases via sim.out
+#   bash tests/run_tests.sh --ipc              -> full Linux IPC on all 46 cases
+#   bash tests/run_tests.sh --ipc --quick      -> full Linux IPC on 6 core cases
+#   bash tests/run_tests.sh --ipc <case1> ...  -> full Linux IPC on named cases
 cd "$(dirname "$0")/.." || exit 1
 
 mode="sim"
-[ "$1" == "--ipc" ] && mode="ipc"
+if [ "$1" == "--ipc" ]; then
+    mode="ipc"
+    shift
+fi
+
+cases=()
+if [ "$1" == "--quick" ]; then
+    cases=(single_process_a3 sjf_example rr_example hpf_output_example hpf_inheritance_example hpf_many_and_long_resources)
+elif [ "$#" -gt 0 ]; then
+    cases=("$@")
+else
+    for dir in tests/*/; do
+        [ -d "$dir" ] && cases+=("$(basename "$dir")")
+    done
+fi
 
 EXPECTED_HEADER="#At time x process y state arr w total z remain y wait k"
 
 passed=0
 failed=0
-for dir in tests/*/; do
-    name=$(basename "$dir")
+for name in "${cases[@]}"; do
+    dir="tests/$name"
+    if [ ! -d "$dir" ]; then
+        echo "FAIL  $name (directory not found)"
+        failed=$((failed + 1))
+        continue
+    fi
     if [ -f "$dir/params" ]; then
         read -r algorithm quantum switch < "$dir/params"
     elif [ -f "$dir/args" ]; then

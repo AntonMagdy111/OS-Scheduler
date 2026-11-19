@@ -5,12 +5,13 @@
 - **Process Control Block (`PCB` in `pcb.h`)**: Stores static metadata (`id`, `arrivalTime`, `runtime`, `originalPriority`), dynamic execution state (`state`, `executedTime`, `hasStarted`, `readySince`, `priorityKey`, `inheritedPriority`), resource usage tracking (`resourceUses`, `heldResource`, `waitingFor`), intrusive container links (`heapIndex`, `nextInQueue`, `nextWaiter`, `prevLive`, `nextLive`), and OS IPC handles (`systemPid`, `sharedMemoryId`, `sharedRemainingTime`).
 - **Indexed Binary Min-Heap (`MinHeap` in `data_structures.h` / `data_structures.c`)**: Used as the ready structure for SJF (keyed by `(runtime, arrivalTime, id)`) and HPF / HPF-Aging (keyed by `(priorityKey, id)`). Storing `heapIndex` inside each `PCB` enables $O(\log n)$ in-place re-heapification (`heap_update`) when priority inheritance changes a ready holder's key, and $O(n)$ `heap_rebuild` on aging ticks.
 - **Intrusive FIFO Queue (`FifoQueue` in `data_structures.h` / `data_structures.c`)**: Singly-linked queue with `head` and `tail` pointers providing $O(1)$ enqueue and dequeue for Round Robin.
-- **Resource Hash Table (`ResourceTable` in `resource.h` / `resource.c`)**: Chained hash table (64 buckets, djb2 string hash) mapping resource names to `Resource` structs. Each `Resource` keeps a pointer to its current `holder` and a `waiters` list sorted by `(originalPriority, id)`, giving $O(1)$ retrieval of the highest-priority waiter on release (`resource_pop_waiter`) and $O(1)$ lookup of the highest waiter priority for inheritance (`resource_best_waiter_priority`).
+- **Resource Hash Table (`ResourceTable` in `resource.h` / `resource.c`)**: Chained hash table (64 buckets, djb2 string hash) mapping dynamically allocated resource names (arbitrary length) to `Resource` structs. Each `Resource` keeps a pointer to its current `holder` and a `waiters` list sorted by `(originalPriority, id)`, giving $O(1)$ retrieval of the highest-priority waiter on release (`resource_pop_waiter`) and $O(1)$ lookup of the highest waiter priority for inheritance (`resource_best_waiter_priority`).
+- **Dynamic Process & Resource Parsing (`process_info.h` / `input.c`)**: Dynamically sized process and per-process resource arrays with dynamic line reading and chunked System V IPC streaming (`MSG_RESOURCE` + `MSG_ARRIVAL` + `MSG_TICK_END`), supporting arbitrary numbers of resource requests per process and arbitrary resource name lengths without truncation.
 
 ## 2. Algorithm Explanations and Results
 
 Every clock tick `now` processes events in the specified order:
-1. Running process events: increment `executedTime`, process resource release, then resource capture (blocking if held), then finish if `executedTime == runtime`.
+1. Running process events: increment `executedTime`, process resource release, then resource capture (blocking if held), then wait for worker termination notice (`onFinish`) and finish if `executedTime == runtime`.
 2. Arrivals at `now` sorted by `id`.
 3. Context-switch completion (`now >= switchEnd`), aged priority refresh (Algorithm 4), RR quantum expiry / HPF preemption check, and next-process selection (`choose_next`).
 
@@ -20,7 +21,9 @@ Every clock tick `now` processes events in the specified order:
 3. **Preemptive HPF with Priority Inheritance (Algorithm 3)**: Priorities range from `0` (highest) to `10` (lowest). A ready process preempts the running process only if its effective priority is strictly smaller (higher priority). Blocking on an occupied resource transfers the waiter's priority to the holder if higher (`min(originalPriority, inheritedPriority)`). On resource release, inherited priority is dropped and the resource transfers to the highest-priority waiter (tie-broken by smaller `id`).
 4. **Bonus — HPF with Priority Demotion / Aging (Algorithm 4)**: Tracks consecutive seconds $w = \text{now} - \text{readySince}$ spent in the Ready state (including context-switch time; Blocked processes do not age). For $w \ge 20$, $\text{bonus} = \lfloor (w - 20)/5 \rfloor + 1$ and $\text{effective priority} = \max(0, \text{originalPriority} - \text{bonus})$. Dispatching resets $w$ to 0 (demotion).
 
-### Verified Specification Test Results
+### Verified Test Results (46 / 46 Passing)
+
+Core specification and targeted edge-case suites (in addition to 34 extended stress & edge-case suites in `tests/`, all 46 passing `make test` with exact log-header, trace, and performance verification):
 
 | Test Case | Algorithm | CPU Utilization | Avg WTA | Avg Waiting | Std WTA |
 |---|---|---:|---:|---:|---:|
@@ -59,8 +62,8 @@ Only assumptions specified in the project document are used:
 
 | Task | Owner | Time Taken |
 |---|---|---:|
-| Input parsing & data structures (`input.c`, `data_structures.c`, `resource.c`) | Team / Implementation | 2.5 h |
-| Scheduling engine & algorithms (`sched_core.c`, `pcb.h`) | Team / Implementation | 4.0 h |
-| Linux IPC, clock & process lifecycle (`process_generator.c`, `scheduler.c`, `process.c`) | Team / Implementation | 3.0 h |
-| Offline simulator, test suite & verification (`sim.c`, `tests/`) | Team / Implementation | 2.0 h |
-| Report & documentation (`REPORT.md`) | Team / Implementation | 1.0 h |
+| Scheduling engine, algorithms & PCB (`sched_core.c`, `sched_core.h`, `pcb.h`) | Anton Magdy | 4.0 h |
+| Linux IPC, clock synchronization & process lifecycle (`process_generator.c`, `scheduler.c`, `process.c`, `headers.h`) | Anton Magdy & Kiro Ashraf | 3.5 h |
+| Input parsing & data structures (`input.c`, `data_structures.c`, `resource.c`, `process_info.h`) | Kiro Ashraf | 2.5 h |
+| GCC 15 / GNU C17 build fix, Linux WSL2 build & code review (`Makefile`, IPC error-handling audit) | Kerolos Nasser | 2.0 h |
+| Hard edge-case & stress test suite, verification & report (`tests/`, `sim.c`, `REPORT.md`) | Ahmed Wael Sadek El Sawy & Anton Magdy | 2.5 h |
