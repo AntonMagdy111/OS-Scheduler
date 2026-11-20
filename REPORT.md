@@ -107,8 +107,8 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 |---|---|
 | **Anton Magdy** | Scheduling engine & all 4 algorithms (`sched_core.c`, `sched_core.h`, `pcb.h`), real-time IPC coordination, report synthesis & evaluation. |
 | **Kerlos Ashraf** | Core data structures (`data_structures.c`, `resource.c`), dynamic input parsing (`input.c`, `process_info.h`), and worker process implementation (`process.c`). |
-| **Kerolos Nasser** | Linux WSL2 / GCC 15 GNU C17 build compatibility (`Makefile`), full code & IPC error-handling review (`scheduler.c`, `process_generator.c`). |
-| **Ahmed Wael Sadek El Sawy** | Hard edge-case & stress test suite (`tests/` — 34 hard cases), cross-validation against independent reference simulator, and verification of `scheduler.log` / `scheduler.perf`. |
+| **Ahmed Wael Sadek El Sawy** | Linux WSL2 / GCC 15 GNU C17 build compatibility (`Makefile`), full code & IPC error-handling review (`scheduler.c`, `process_generator.c`). |
+| **Kirolos Nasser** | Hard edge-case & stress test suite (`tests/` — 34 hard cases), cross-validation against independent reference simulator, and verification of `scheduler.log` / `scheduler.perf`. |
 
 ---
 
@@ -119,7 +119,7 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 | System design, PCB & scheduling engine (`sched_core.c`, `pcb.h`) | Anton Magdy | 12.0 h |
 | Data structures & dynamic input parsing (`data_structures.c`, `resource.c`, `input.c`) | Kerlos Ashraf | 7.0 h |
 | Linux System V IPC, clock sync & worker lifecycle (`process_generator.c`, `scheduler.c`, `process.c`) | Anton Magdy, Kerlos Ashraf | 10.0 h |
-| GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Kerolos Nasser | 6.0 h |
-| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Ahmed Wael Sadek El Sawy, Anton Magdy | 8.0 h |
-| Report writing & documentation (`REPORT.md`, `REPORT.pdf`, `README`) | Anton Magdy, Ahmed Wael Sadek El Sawy | 4.0 h |
+| GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Ahmed Wael Sadek El Sawy | 6.0 h |
+| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Kirolos Nasser, Anton Magdy | 8.0 h |
+| Report writing & documentation (`REPORT.md`, `REPORT.pdf`, `README`) | Anton Magdy, Kirolos Nasser | 4.0 h |
 | **Total** | | **47.0 h** |
