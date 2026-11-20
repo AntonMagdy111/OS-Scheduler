@@ -1,0 +1,3 @@
+*.out
+scheduler.log
+scheduler.perf
