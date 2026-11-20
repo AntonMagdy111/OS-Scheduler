@@ -1,5 +1,5 @@
 # OS Scheduler — Project Report
-**Cairo University — Faculty of Engineering — Computer Engineering Department**  
+**Cairo University — Faculty of Engineering — Credit Hour System**  
 **Course:** Operating Systems (CMPS303)
 
 ---
@@ -14,6 +14,7 @@
 | **Chained Hash Table & Sorted Waiter List (`ResourceTable`, `Resource`)** | `resource.h`, `resource.c` | 64-bucket chained hash table (djb2 hash) mapping dynamically allocated resource names (arbitrary length) to `Resource` structs. Each `Resource` stores its current `holder` and a `waiters` list sorted by `(originalPriority, id)`. | Lookup: $O(1)$ avg · Best waiter / Transfer: $O(1)$ · Insert waiter: $O(w)$ |
 | **Dynamic Process & Resource Arrays (`ProcessInfo`, `ResourceRequest`)** | `process_info.h`, `input.c` | Dynamically resized arrays with dynamic line reading for `processes.txt` and `resources.txt` (no fixed cap on resource count per process or resource name length). | Amortized $O(1)$ append |
 | **Live PCB Doubly-Linked List** | `pcb.h`, `sched_core.c` | Tracks all active processes (`liveHead`, `liveCount`) for $O(1)$ insertion/deletion and clean emergency teardown on `SIGINT`/`SIGTERM`. | Insert / Delete: $O(1)$ |
+| **Dynamic Arrival & Statistics Buffers (`ArrivalBuffer`, `wtaValues`)** | `scheduler.c`, `sched_core.h` | Growable arrays storing per-tick arrivals received over IPC and exact unrounded per-process `WTA` doubles for computing `Avg WTA` and population `Std WTA`. | Amortized $O(1)$ append |
 
 ### IPC Mechanisms (`headers.h`, `process_generator.c`, `scheduler.c`, `process.c`, `clk.c`)
 - **Clock Shared Memory (`SHKEY = 300`)**: Emulated integer clock incremented every 1 second by `clk.out` and read via `getClk()`.
@@ -105,7 +106,7 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 | Team Member | Responsibilities |
 |---|---|
 | **Anton Magdy** | Scheduling engine & all 4 algorithms (`sched_core.c`, `sched_core.h`, `pcb.h`), real-time IPC coordination, report synthesis & evaluation. |
-| **Kiro Ashraf** | Core data structures (`data_structures.c`, `resource.c`), dynamic input parsing (`input.c`, `process_info.h`), and worker process implementation (`process.c`). |
+| **Kerlos Ashraf** | Core data structures (`data_structures.c`, `resource.c`), dynamic input parsing (`input.c`, `process_info.h`), and worker process implementation (`process.c`). |
 | **Kerolos Nasser** | Linux WSL2 / GCC 15 GNU C17 build compatibility (`Makefile`), full code & IPC error-handling review (`scheduler.c`, `process_generator.c`). |
 | **Ahmed Wael Sadek El Sawy** | Hard edge-case & stress test suite (`tests/` — 34 hard cases), cross-validation against independent reference simulator, and verification of `scheduler.log` / `scheduler.perf`. |
 
@@ -115,10 +116,10 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 
 | Task | Owner(s) | Time Taken |
 |---|---|---:|
-| System design, PCB & scheduling engine (`sched_core.c`, `pcb.h`) | Anton Magdy | 4.0 h |
-| Data structures & dynamic input parsing (`data_structures.c`, `resource.c`, `input.c`) | Kiro Ashraf | 2.5 h |
-| Linux System V IPC, clock sync & worker lifecycle (`process_generator.c`, `scheduler.c`, `process.c`) | Anton Magdy, Kiro Ashraf | 3.5 h |
-| GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Kerolos Nasser | 2.0 h |
-| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Ahmed Wael Sadek El Sawy, Anton Magdy | 2.5 h |
-| Report writing & documentation (`REPORT.md`, `README`) | Anton Magdy, Ahmed Wael Sadek El Sawy | 1.5 h |
-| **Total** | | **16.0 h** |
+| System design, PCB & scheduling engine (`sched_core.c`, `pcb.h`) | Anton Magdy | 12.0 h |
+| Data structures & dynamic input parsing (`data_structures.c`, `resource.c`, `input.c`) | Kerlos Ashraf | 7.0 h |
+| Linux System V IPC, clock sync & worker lifecycle (`process_generator.c`, `scheduler.c`, `process.c`) | Anton Magdy, Kerlos Ashraf | 10.0 h |
+| GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Kerolos Nasser | 6.0 h |
+| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Ahmed Wael Sadek El Sawy, Anton Magdy | 8.0 h |
+| Report writing & documentation (`REPORT.md`, `REPORT.pdf`, `README`) | Anton Magdy, Ahmed Wael Sadek El Sawy | 4.0 h |
+| **Total** | | **47.0 h** |
