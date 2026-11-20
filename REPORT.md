@@ -1,69 +1,124 @@
-# OS Scheduler — CMPS303 Project Report
+# OS Scheduler — Project Report
+**Cairo University — Faculty of Engineering — Computer Engineering Department**  
+**Course:** Operating Systems (CMPS303)
+
+---
 
 ## 1. Data Structures Used
 
-- **Process Control Block (`PCB` in `pcb.h`)**: Stores static metadata (`id`, `arrivalTime`, `runtime`, `originalPriority`), dynamic execution state (`state`, `executedTime`, `hasStarted`, `readySince`, `priorityKey`, `inheritedPriority`), resource usage tracking (`resourceUses`, `heldResource`, `waitingFor`), intrusive container links (`heapIndex`, `nextInQueue`, `nextWaiter`, `prevLive`, `nextLive`), and OS IPC handles (`systemPid`, `sharedMemoryId`, `sharedRemainingTime`).
-- **Indexed Binary Min-Heap (`MinHeap` in `data_structures.h` / `data_structures.c`)**: Used as the ready structure for SJF (keyed by `(runtime, arrivalTime, id)`) and HPF / HPF-Aging (keyed by `(priorityKey, id)`). Storing `heapIndex` inside each `PCB` enables $O(\log n)$ in-place re-heapification (`heap_update`) when priority inheritance changes a ready holder's key, and $O(n)$ `heap_rebuild` on aging ticks.
-- **Intrusive FIFO Queue (`FifoQueue` in `data_structures.h` / `data_structures.c`)**: Singly-linked queue with `head` and `tail` pointers providing $O(1)$ enqueue and dequeue for Round Robin.
-- **Resource Hash Table (`ResourceTable` in `resource.h` / `resource.c`)**: Chained hash table (64 buckets, djb2 string hash) mapping dynamically allocated resource names (arbitrary length) to `Resource` structs. Each `Resource` keeps a pointer to its current `holder` and a `waiters` list sorted by `(originalPriority, id)`, giving $O(1)$ retrieval of the highest-priority waiter on release (`resource_pop_waiter`) and $O(1)$ lookup of the highest waiter priority for inheritance (`resource_best_waiter_priority`).
-- **Dynamic Process & Resource Parsing (`process_info.h` / `input.c`)**: Dynamically sized process and per-process resource arrays with dynamic line reading and chunked System V IPC streaming (`MSG_RESOURCE` + `MSG_ARRIVAL` + `MSG_TICK_END`), supporting arbitrary numbers of resource requests per process and arbitrary resource name lengths without truncation.
+| Data Structure | File(s) | Purpose | Complexity |
+|---|---|---|---|
+| **Process Control Block (`PCB`)** | `pcb.h` | Stores static metadata (`id`, `arrivalTime`, `runtime`, `originalPriority`), dynamic state (`state`, `executedTime`, `hasStarted`, `readySince`, `priorityKey`, `inheritedPriority`), resource usage list & locks (`resourceUses`, `heldResource`, `waitingFor`), intrusive links (`heapIndex`, `nextInQueue`, `nextWaiter`, `prevLive`, `nextLive`), and OS IPC handles (`systemPid`, `sharedMemoryId`, `sharedRemainingTime`). | $O(1)$ field access |
+| **Indexed Binary Min-Heap (`MinHeap`)** | `data_structures.h`, `data_structures.c` | Ready queue for **SJF** (ordered by `(runtime, arrivalTime, id)`) and **HPF / HPF-Aging** (ordered by `(priorityKey, id)`). Storing `heapIndex` inside each `PCB` allows in-place key updates (`heap_update`) when priority inheritance boosts a Ready resource holder, and linear-time `heap_rebuild` on aging ticks. | Push/Pop/Update: $O(\log n)$ · Peek: $O(1)$ · Rebuild: $O(n)$ |
+| **Intrusive FIFO Queue (`FifoQueue`)** | `data_structures.h`, `data_structures.c` | Singly-linked queue (`head`, `tail`) used as the Ready queue for **Round Robin**. | Enqueue / Dequeue / Peek: $O(1)$ |
+| **Chained Hash Table & Sorted Waiter List (`ResourceTable`, `Resource`)** | `resource.h`, `resource.c` | 64-bucket chained hash table (djb2 hash) mapping dynamically allocated resource names (arbitrary length) to `Resource` structs. Each `Resource` stores its current `holder` and a `waiters` list sorted by `(originalPriority, id)`. | Lookup: $O(1)$ avg · Best waiter / Transfer: $O(1)$ · Insert waiter: $O(w)$ |
+| **Dynamic Process & Resource Arrays (`ProcessInfo`, `ResourceRequest`)** | `process_info.h`, `input.c` | Dynamically resized arrays with dynamic line reading for `processes.txt` and `resources.txt` (no fixed cap on resource count per process or resource name length). | Amortized $O(1)$ append |
+| **Live PCB Doubly-Linked List** | `pcb.h`, `sched_core.c` | Tracks all active processes (`liveHead`, `liveCount`) for $O(1)$ insertion/deletion and clean emergency teardown on `SIGINT`/`SIGTERM`. | Insert / Delete: $O(1)$ |
+
+### IPC Mechanisms (`headers.h`, `process_generator.c`, `scheduler.c`, `process.c`, `clk.c`)
+- **Clock Shared Memory (`SHKEY = 300`)**: Emulated integer clock incremented every 1 second by `clk.out` and read via `getClk()`.
+- **Generator → Scheduler Message Queue (`GENERATOR_MSGQ_KEY = 400`)**: Streams each arriving process's resource requests (`MSG_RESOURCE`, chunked for arbitrarily long names) followed by `MSG_ARRIVAL`, then a `MSG_TICK_END` barrier per clock second so the scheduler never misses or reorders arrivals.
+- **Scheduler → Process Control**: `fork()` + `execl("./process.out")` on first dispatch, `SIGSTOP` / `SIGCONT` on preemption and resumption, plus a private shared-memory integer (`IPC_PRIVATE`) publishing each process's remaining time.
+- **Process → Scheduler Termination Queue (`PROCESS_MSGQ_KEY = 500`)**: When `remainingtime` reaches `0`, the worker sends its completion message (`mtype = id + 1`) and terminates on its own. The scheduler polls `msgrcv(IPC_NOWAIT)` alongside `waitpid(WNOHANG)` so a worker crash never hangs the simulation, then reaps it and deletes its PCB and shared memory.
+
+---
 
 ## 2. Algorithm Explanations and Results
 
-Every clock tick `now` processes events in the specified order:
-1. Running process events: increment `executedTime`, process resource release, then resource capture (blocking if held), then wait for worker termination notice (`onFinish`) and finish if `executedTime == runtime`.
-2. Arrivals at `now` sorted by `id`.
-3. Context-switch completion (`now >= switchEnd`), aged priority refresh (Algorithm 4), RR quantum expiry / HPF preemption check, and next-process selection (`choose_next`).
+### Per-Second Event Order
+At every integer clock second `now`, `scheduler_tick()` (`sched_core.c`) executes in the exact order specified by the project document:
+1. **Running process events**: increment `executedTime` and update shared memory; if `executedTime == heldReleaseTime`, release the held resource (transferring it directly to the highest-priority blocked waiter); next, if `executedTime == next captureTime`, capture the resource if free or block the process (boosting the holder via priority inheritance); finally, if `executedTime == runtime`, await the worker's termination notice, log `finished`, update stats, and delete the PCB.
+2. **Arrivals at `now`**: inserted into the Ready structure in ascending `id` order.
+3. **Switch completion, aging, preemption, and next-process choice**:
+   - Complete any context switch ending at `now` (`dispatch` target).
+   - Refresh aged priorities (Algorithm 4 only).
+   - Check RR quantum expiry (continue without logging if Ready queue is empty; otherwise preempt and enqueue after arrivals) or HPF preemption (`ready_peek->priorityKey < running_priority`).
+   - If the CPU is free and Ready is non-empty: start immediately with `0` overhead if the CPU was idle, or begin a context switch of length `contextSwitchTime` if a process just left the CPU at `now`.
 
-### Implemented Algorithms
-1. **Shortest Job First (SJF, Algorithm 1)**: Non-preemptive; selects the ready process with minimum `(runtime, arrivalTime, id)` from the min-heap. Context switch = 1 sec.
-2. **Round Robin (RR, Algorithm 2)**: Preemptive with user-supplied `quantum` and `contextSwitchTime` (default 1). Arrivals at a quantum-expiry tick are enqueued before the preempted process. If the ready queue is empty at quantum expiry, the running process continues with no stop, switch, or log line.
-3. **Preemptive HPF with Priority Inheritance (Algorithm 3)**: Priorities range from `0` (highest) to `10` (lowest). A ready process preempts the running process only if its effective priority is strictly smaller (higher priority). Blocking on an occupied resource transfers the waiter's priority to the holder if higher (`min(originalPriority, inheritedPriority)`). On resource release, inherited priority is dropped and the resource transfers to the highest-priority waiter (tie-broken by smaller `id`).
-4. **Bonus — HPF with Priority Demotion / Aging (Algorithm 4)**: Tracks consecutive seconds $w = \text{now} - \text{readySince}$ spent in the Ready state (including context-switch time; Blocked processes do not age). For $w \ge 20$, $\text{bonus} = \lfloor (w - 20)/5 \rfloor + 1$ and $\text{effective priority} = \max(0, \text{originalPriority} - \text{bonus})$. Dispatching resets $w$ to 0 (demotion).
+### Implemented Scheduling Algorithms
+1. **Shortest Job First (SJF — Algorithm 1)**: Non-preemptive; picks the Ready process with smallest `(runtime, arrivalTime, id)`. Context switch is fixed at `1` sec.
+2. **Round Robin (RR — Algorithm 2)**: Preemptive FIFO rotation with user-supplied `quantum` and `contextSwitchTime` (default `1` sec). Arrivals at quantum expiry enter the queue ahead of the preempted process; arrivals during a context switch enter behind the already-queued preempted process.
+3. **Preemptive HPF with Priority Inheritance (Algorithm 3)**: Priorities range from `0` (highest) to `10` (lowest); strictly higher priority preempts, equal priorities do not preempt and tie-break by smaller `id`. Blocking on a held resource grants the holder `min(originalPriority, bestWaiterPriority)`. On release, inheritance is dropped and the resource transfers to the highest-priority waiter (smaller `id` on ties). Context switch is fixed at `1` sec.
+4. **Bonus — HPF with Priority Demotion / Aging (Algorithm 4)**: Extends Algorithm 3 with consecutive Ready waiting counter $w = \text{now} - \text{readySince}$ (includes context-switch time; Blocked processes do not age). For $w < 20$, $\text{bonus} = 0$; for $w \ge 20$, $\text{bonus} = \lfloor(w - 20)/5\rfloor + 1$ and $\text{effective priority} = \max(0, \text{originalPriority} - \text{bonus})$. A Ready holder uses $\min(\text{effective priority}, \text{inheritedPriority})$. Upon dispatch (`started` or `resumed`), $w$ resets to `0` and the process is demoted back to `originalPriority`.
 
 ### Verified Test Results (46 / 46 Passing)
-
-Core specification and targeted edge-case suites (in addition to 34 extended stress & edge-case suites in `tests/`, all 46 passing `make test` with exact log-header, trace, and performance verification):
+All 5 official PDF examples reproduce character-for-character on both the offline driver (`sim.out`) and the live Linux IPC system (`process_generator.out` + `clk.out` + `scheduler.out` + `process.out`), along with 41 additional edge-case and stress tests in `tests/`:
 
 | Test Case | Algorithm | CPU Utilization | Avg WTA | Avg Waiting | Std WTA |
 |---|---|---:|---:|---:|---:|
-| `sjf_example` | SJF (1) | 78% | 3.06 | 6 | 1.20 |
+| `sjf_example` *(PDF)* | SJF (1) | 78% | 3.06 | 6 | 1.20 |
 | `sjf_ties_arrival_and_id` | SJF (1) | 76% | 3.73 | 7 | 1.72 |
-| `rr_example` | RR (2, q=3, cs=1) | 68% | 5.59 | 10 | 3.30 |
+| `rr_example` *(PDF)* | RR (2, q=3, cs=1) | 68% | 5.59 | 10 | 3.30 |
 | `rr_quantum_continuation` | RR (2, q=3, cs=1) | 58% | 1.00 | 0 | 0.00 |
 | `rr_arrival_and_switch_order` | RR (2, q=2, cs=2) | 53% | 3.33 | 5 | 1.55 |
-| `hpf_output_example` | HPF (3, cs=1) | 75% | 1.58 | 3 | 0.25 |
-| `hpf_inheritance_example` | HPF (3, cs=1) | 65% | 3.31 | 10 | 0.32 |
+| `hpf_output_example` *(PDF)* | HPF (3, cs=1) | 75% | 1.58 | 3 | 0.25 |
+| `hpf_inheritance_example` *(PDF)* | HPF (3, cs=1) | 65% | 3.31 | 10 | 0.32 |
 | `hpf_multi_waiters_and_chained_resources` | HPF (3, cs=1) | 63% | 3.78 | 10 | 0.68 |
 | `hpf_many_and_long_resources` | HPF (3, cs=1) | 81% | 3.05 | 9 | 1.30 |
 | `hpf_plain_on_aging_input` | HPF (3, cs=1) | 90% | 3.11 | 13 | 2.63 |
-| `hpf_aging_example` | HPF-Aging (4, cs=1) | 88% | 3.20 | 15 | 2.69 |
+| `hpf_aging_example` *(PDF Bonus)* | HPF-Aging (4, cs=1) | 88% | 3.20 | 15 | 2.69 |
 | `hpf_aging_switch_tie` | HPF-Aging (4, cs=1) | 88% | 6.01 | 22 | 3.68 |
 
-### Comparison: Plain HPF (Algorithm 3) vs. HPF with Priority Demotion (Algorithm 4)
+### Bonus Evaluation: Plain HPF (Algorithm 3) vs. HPF with Priority Demotion (Algorithm 4)
 
-On the aging workload (`P1(arr=1, run=30, prio=5)`, `P2(arr=2, run=6, prio=5)`, `P3(arr=25, run=3, prio=4)`):
-- **Starvation & Preemptions**: In Plain HPF (`hpf_plain_on_aging_input`), P2 waits `35` seconds behind P1 and P3 and never preempts P1 (`1` preemption total: P3 preempting P1 at `t=25`). With Priority Demotion (`hpf_aging_example`), P2's consecutive Ready time reaches `w=21` at `t=23` (`bonus=1`, effective priority `4 < 5`), so P2 preempts P1 at `t=22` and starts at `t=23` without starving indefinitely if higher-priority arrivals continued.
-- **Overhead & Metrics**: The extra preemption caused by aging adds a second context switch (CPU utilization drops from `90%` to `88%`), and demoting P2 back to priority `5` upon dispatch allows P3 (`prio 4`) to preempt P2 at `t=25`, increasing P1's wait from `5` to `8` and Avg Waiting from `13` to `15` (Avg WTA `3.11` -> `3.20`, Std WTA `2.63` -> `2.69`). Thus, aging bounds starvation at the cost of additional preemptions and context-switch overhead.
+Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
+
+| Workload | Algo | CPU Util | Avg WTA | Avg Wait | Std WTA | Stops (Preempt/Block) | Avg First-Start Wait |
+|---|---|---:|---:|---:|---:|---:|---:|
+| **PDF Aging Example** (3 procs) | Algo 3 (Plain HPF) | 90% | 3.11 | 13 | 2.63 | 1 | 12.0 s |
+| | Algo 4 (Aging) | 88% | 3.20 | 15 | 2.69 | 2 | 7.3 s |
+| **Multi-Waiter Inheritance** (5 procs) | Algo 3 (Plain HPF) | 73% | 5.35 | 23 | 1.40 | 6 | 9.8 s |
+| | Algo 4 (Aging) | 69% | 5.60 | 24 | 1.59 | 8 | 9.6 s |
+| **Many Holders** (9 procs, 4 res) | Algo 3 (Plain HPF) | 85% | 4.91 | 32 | 1.96 | 3 | 27.7 s |
+| | Algo 4 (Aging) | 79% | 5.38 | 36 | 2.27 | 9 | 23.9 s |
+| **Long Jobs Stress** (30 procs, up to 60s) | Algo 3 (Plain HPF) | 96% | 26.02 | 472 | 39.19 | 5 | 433.5 s |
+| | Algo 4 (Aging) | 68% | 39.99 | 942 | 30.27 | 468 | 253.2 s |
+| **Dense Contention** (80 procs, 5 res) | Algo 3 (Plain HPF) | 83% | 78.41 | 232 | 112.03 | 7 | 230.3 s |
+| | Algo 4 (Aging) | 55% | 89.80 | 350 | 71.54 | 237 | 184.9 s |
+
+**Conclusions from Measured Results:**
+- **Eliminates Starvation & Cuts First-Response Delay**: Under heavy load (`Long Jobs Stress`), aging cuts average time-to-first-start by **42%** (`433.5 s → 253.2 s`, max wait-to-start `955 s → 587 s`) and improves turnaround fairness significantly (`Std WTA` drops from `39.19 → 30.27` on 30 long jobs and `112.03 → 71.54` on 80 dense jobs — a **36%** reduction in WTA spread).
+- **Cost of Demotion (Preemption & Context-Switch Overhead)**: Because demotion resets a promoted process back to its low original priority immediately upon dispatch, other aged Ready processes quickly preempt it after 1 second. On the 30-job and 80-job stress suites, `stopped` events jump from `5 → 468` and `7 → 237`. With a 1-second context-switch penalty per preemption, CPU utilization drops (`96% → 68%`, `83% → 55%`) and average completion wait / Avg WTA rise (`472 → 942` and `232 → 350`). Thus, aging with immediate demotion guarantees progress for starving processes at the cost of throughput under dense long-running workloads.
+
+---
 
 ## 3. Assumptions
 
-Only assumptions specified in the project document are used:
-- Simulation clock starts at time `1`; earliest arrival is `1`.
-- All time values are integers (1-second granularity); context switch is fixed at `1` second for SJF and HPF, and user-provided (default `1`) for RR.
-- First process on an idle CPU starts with 0 context-switch overhead.
-- Processes arriving at the same second are ordered by `id`.
+### A. Specification Assumptions (From Project Document)
+- The simulation clock starts at time `1` (earliest possible process arrival is `1`), and all time quantities are integers (`1` sec granularity).
+- Context-switch overhead is fixed at `1` second for SJF, HPF, and HPF-Aging, and user-provided (default `1` sec) for Round Robin. An idle CPU dispatches with `0` overhead.
+- Processes arriving at the same second are ordered by ascending `id`.
 - Priority values are in `[0, 10]` (`0` highest, `10` lowest); equal-priority processes do not preempt the running process and tie-break by smaller `id`.
-- Each resource entry satisfies `1 <= capture < release <= runtime`, intervals for the same process do not overlap, and a process holds at most one resource at a time.
-- CPU utilization and Avg Waiting are floored to integers; WTA, Avg WTA, and Std WTA (population standard deviation) are rounded to 2 decimal places.
-- **Arrival / Aging at Context-Switch End (HPF family)**: When a context switch completes at second $t$, the target process chosen when the switch began is dispatched at $t$ and runs for at least 1 second before any newcomer arriving at $t$ can preempt it (avoiding `started` and `stopped` log lines at the identical timestamp $t$). If the TA prefers immediate 0-second preemption at $t$ or choosing the target at the end of the switch, `sched_core.c` supports `-DPREEMPT_AT_DISPATCH=1` and `-DCHOOSE_AT_SWITCH_END=1` at compile time.
+- Resource entries obey `1 <= capture < release <= runtime`, intervals for the same process do not overlap, and a process holds at most one resource at a time (preventing circular-wait deadlocks).
+- `CPU utilization` and `Avg Waiting` are floored to integers; `WTA`, `Avg WTA`, and population `Std WTA` are rounded to 2 decimal places.
 
-## 4. Workload Distribution & Time Log
+### B. Implementation Assumptions (For TA Confirmation)
+1. **Higher-Priority Arrival or Aging at the Exact Second a Context Switch Ends (HPF / HPF-Aging)**: The specification does not explicitly specify whether a process arriving or aging at the exact second `t = switchEnd` should preempt the newly dispatched target at `t` with `0` seconds of execution. By default, our scheduler chooses the switch target when the switch begins, dispatches it at `switchEnd`, and lets it execute for at least `1` second before preemption (avoiding `started` and `stopped` log lines at the identical timestamp `t`). Because the PDF requires TA permission for extra assumptions, `sched_core.c` also supports compile-time flags `-DPREEMPT_AT_DISPATCH=1` (immediate 0-second preemption) and `-DCHOOSE_AT_SWITCH_END=1` (defer target choice to `switchEnd`) so the behavior can be switched in one flag if preferred.
+2. **Cooperative `1 ms` Loop Sleep in `process.c`**: Because the scheduler tracks each process's CPU execution time via shared memory and `SIGSTOP`/`SIGCONT`, `process.c` sleeps `1 ms` (`usleep(1000)`) per loop iteration so it does not starve `clk.out` or `scheduler.out` on a single-core VM or WSL environment.
+3. **Round Robin Context-Switch Time of `0`**: Accepted as a valid non-negative integer input (`0` overhead between quanta).
+4. **Defensive Input & Worker Error Handling**: Malformed lines or invalid/overlapping resource entries are ignored with a warning to `stderr`; worker crash or `fork()` failure aborts cleanly with non-zero exit status and full IPC cleanup rather than hanging or producing partial results.
 
-| Task | Owner | Time Taken |
+---
+
+## 4. Workload Distribution
+
+| Team Member | Responsibilities |
+|---|---|
+| **Anton Magdy** | Scheduling engine & all 4 algorithms (`sched_core.c`, `sched_core.h`, `pcb.h`), real-time IPC coordination, report synthesis & evaluation. |
+| **Kiro Ashraf** | Core data structures (`data_structures.c`, `resource.c`), dynamic input parsing (`input.c`, `process_info.h`), and worker process implementation (`process.c`). |
+| **Kerolos Nasser** | Linux WSL2 / GCC 15 GNU C17 build compatibility (`Makefile`), full code & IPC error-handling review (`scheduler.c`, `process_generator.c`). |
+| **Ahmed Wael Sadek El Sawy** | Hard edge-case & stress test suite (`tests/` — 34 hard cases), cross-validation against independent reference simulator, and verification of `scheduler.log` / `scheduler.perf`. |
+
+---
+
+## 5. Time Taken for Each Task
+
+| Task | Owner(s) | Time Taken |
 |---|---|---:|
-| Scheduling engine, algorithms & PCB (`sched_core.c`, `sched_core.h`, `pcb.h`) | Anton Magdy | 4.0 h |
-| Linux IPC, clock synchronization & process lifecycle (`process_generator.c`, `scheduler.c`, `process.c`, `headers.h`) | Anton Magdy & Kiro Ashraf | 3.5 h |
-| Input parsing & data structures (`input.c`, `data_structures.c`, `resource.c`, `process_info.h`) | Kiro Ashraf | 2.5 h |
-| GCC 15 / GNU C17 build fix, Linux WSL2 build & code review (`Makefile`, IPC error-handling audit) | Kerolos Nasser | 2.0 h |
-| Hard edge-case & stress test suite, verification & report (`tests/`, `sim.c`, `REPORT.md`) | Ahmed Wael Sadek El Sawy & Anton Magdy | 2.5 h |
+| System design, PCB & scheduling engine (`sched_core.c`, `pcb.h`) | Anton Magdy | 4.0 h |
+| Data structures & dynamic input parsing (`data_structures.c`, `resource.c`, `input.c`) | Kiro Ashraf | 2.5 h |
+| Linux System V IPC, clock sync & worker lifecycle (`process_generator.c`, `scheduler.c`, `process.c`) | Anton Magdy, Kiro Ashraf | 3.5 h |
+| GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Kerolos Nasser | 2.0 h |
+| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Ahmed Wael Sadek El Sawy, Anton Magdy | 2.5 h |
+| Report writing & documentation (`REPORT.md`, `README`) | Anton Magdy, Ahmed Wael Sadek El Sawy | 1.5 h |
+| **Total** | | **16.0 h** |
