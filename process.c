@@ -45,9 +45,9 @@ int main(int argc, char *argv[])
         usleep(1000);
     }
 
-    /* notify the scheduler of the termination */
+    /* notify the scheduler of the termination (mtype = id + 1 ensures mtype > 0 even if id == 0) */
     ProcessMessage message;
-    message.mtype = processId;
+    message.mtype = (long)processId + 1;
     message.processId = processId;
     message.systemPid = getpid();
     while (msgsnd(queueId, &message, MESSAGE_SIZE(ProcessMessage), 0) == -1 && errno == EINTR) {

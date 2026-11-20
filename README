@@ -15,3 +15,20 @@ make run
 # If you added a file to your project add it to the build section in the Makefile
 
 # Always start the line with a tab in Makefile, it is its syntax
+
+## Additional Usage & Testing
+
+# Non-interactive CLI form:
+#   ./process_generator.out [processes.txt] [resources.txt] [algo 1-4] [quantum] [context_switch]
+#   algo: 1 = SJF, 2 = RR, 3 = Preemptive HPF + Priority Inheritance, 4 = HPF + Aging/Demotion (bonus)
+# Example (Round Robin, quantum = 3, context switch = 1):
+./process_generator.out processes.txt resources.txt 2 3 1
+
+# Run all 46 automated test cases (fast offline check using the same sched_core.c engine via sim.out):
+make test
+
+# Run the 6 core test cases live on the real 1-second Linux clock & System V IPC:
+make test-ipc
+
+# Run specific named cases live on the real Linux clock:
+bash tests/run_tests.sh --ipc sjf_example rr_example hpf_inheritance_example

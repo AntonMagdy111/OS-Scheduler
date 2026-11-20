@@ -117,10 +117,11 @@ static void on_finish(PCB *pcb, void *context)
     }
 
     ProcessMessage message;
+    long finishType = (long)pcb->id + 1; /* > 0 even if a test uses id == 0 */
     int reaped = 0;
     for (;;) {
         ssize_t r = msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
-                           pcb->id, IPC_NOWAIT);
+                           finishType, IPC_NOWAIT);
         if (r != -1)
             break;
         if (errno == EINTR)
@@ -135,7 +136,7 @@ static void on_finish(PCB *pcb, void *context)
         if (wp == pcb->systemPid) {
             /* One final non-blocking check in case the notice arrived right before exit. */
             if (msgrcv(processQueueId, &message, MESSAGE_SIZE(ProcessMessage),
-                       pcb->id, IPC_NOWAIT) == -1) {
+                       finishType, IPC_NOWAIT) == -1) {
                 fprintf(stderr, "scheduler: worker for process %d exited before notifying completion\n",
                         pcb->id);
                 fatalError = 1;
