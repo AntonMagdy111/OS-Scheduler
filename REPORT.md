@@ -121,5 +121,5 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 | Data structures & dynamic input parsing (`data_structures.c`, `resource.c`, `input.c`) | Ahmed Wael | 7.0 h |
 | Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Kirolos Ashraf, Anton Magdy | 8.0 h |
 | GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Kirolos Nasser | 6.0 h |
-| Report writing & documentation (`REPORT.md`, `REPORT.pdf`, `README`) | Anton Magdy, Ahmed Wael | 4.0 h |
+| Project report & documentation | Anton Magdy | 4.0 h |
 | **Total** | | **47.0 h** |
