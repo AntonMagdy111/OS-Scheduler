@@ -105,9 +105,9 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 
 | Team Member | Responsibilities |
 |---|---|
-| **Anton Magdy** | Scheduling engine, SJF, Round Robin & Bonus HPF with Priority Demotion / Aging (`sched_core.c`, `sched_core.h`, `pcb.h`), real-time IPC coordination, report synthesis & evaluation. |
+| **Anton Magdy** | Scheduling engine core, PCB (`pcb.h`, `sched_core.h`), Shortest Job First (SJF) & Round Robin (RR) scheduling algorithms (`sched_core.c`), real-time IPC coordination, test suite integration, and report synthesis. |
 | **Ahmed Wael** | Core data structures (`data_structures.c`, `resource.c`), dynamic input parsing (`input.c`, `process_info.h`), and worker process implementation (`process.c`). |
-| **Kirolos Ashraf** | Preemptive HPF with Priority Inheritance (`sched_core.c`, `resource.c`), hard edge-case & stress test suite (`tests/` — 46 cases), cross-validation against reference outputs, and verification of `scheduler.log` / `scheduler.perf`. |
+| **Kirolos Ashraf** | Preemptive HPF with Priority Inheritance (Algorithm 3), Bonus HPF with Priority Demotion / Aging (Algorithm 4), resource contention & priority-inheritance scheduling logic (`sched_core.c`), and HPF / Bonus evaluation & verification. |
 | **Kirolos Nasser** | Linux WSL2 / GCC 15 GNU C17 build compatibility (`Makefile`), full code & IPC error-handling review (`scheduler.c`, `process_generator.c`), and live Linux testing. |
 
 ---
@@ -116,10 +116,10 @@ Measured results running identical workloads on Algorithm 3 vs. Algorithm 4:
 
 | Task | Owner(s) | Time Taken |
 |---|---|---:|
-| System design, PCB, SJF, Round Robin & Bonus HPF-Aging (`sched_core.c`, `pcb.h`) | Anton Magdy | 10.0 h |
-| Preemptive HPF with Priority Inheritance (`sched_core.c`, `resource.c`) | Kirolos Ashraf | 6.0 h |
+| System design, PCB, scheduling engine core, SJF & Round Robin (`sched_core.c`, `pcb.h`) | Anton Magdy | 10.0 h |
+| Preemptive HPF with Priority Inheritance & Bonus HPF-Aging (`sched_core.c`) | Kirolos Ashraf | 9.0 h |
 | Linux System V IPC, clock sync & worker lifecycle (`process_generator.c`, `scheduler.c`, `process.c`) | Anton Magdy, Ahmed Wael | 10.0 h |
 | Data structures & dynamic input parsing (`data_structures.c`, `resource.c`, `input.c`) | Ahmed Wael | 7.0 h |
-| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Kirolos Ashraf, Anton Magdy | 8.0 h |
+| Test suite creation (46 cases), stress testing & Bonus A3 vs. A4 evaluation | Anton Magdy, Kirolos Ashraf | 6.0 h |
 | GCC 15 / C17 build fix, IPC failure-path code review & live Linux testing | Kirolos Nasser | 6.0 h |
-| **Total** | | **47.0 h** |
+| **Total** | | **48.0 h** |
