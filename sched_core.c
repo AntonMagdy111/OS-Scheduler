@@ -542,6 +542,9 @@ void scheduler_destroy(Scheduler *s)
 {
     while (s->liveHead)
         delete_pcb(s, s->liveHead);
+    s->running = NULL;
+    s->switchTarget = NULL;
+    s->switching = 0;
     heap_free(&s->readyHeap);
     resource_table_free(&s->resources);
     free(s->wtaValues);

@@ -50,7 +50,13 @@ int main(int argc, char *argv[])
     message.mtype = (long)processId + 1;
     message.processId = processId;
     message.systemPid = getpid();
-    while (msgsnd(queueId, &message, MESSAGE_SIZE(ProcessMessage), 0) == -1 && errno == EINTR) {
+    while (msgsnd(queueId, &message, MESSAGE_SIZE(ProcessMessage), 0) == -1) {
+        if (errno == EINTR)
+            continue;
+        perror("process: msgsnd");
+        shmdt((const void *)sharedRemaining);
+        destroyClk(false);
+        return 1;
     }
 
     shmdt((const void *)sharedRemaining);

@@ -143,8 +143,11 @@ int load_processes(const char *path, ProcessInfo **outList)
         }
         free(line);
 
-        if (info.runtime <= 0) {
-            fprintf(stderr, "processes: skipping process %d (runtime <= 0)\n", info.id);
+        if (info.id < 0 || info.arrival < 1 || info.runtime <= 0 ||
+            info.priority < 0 || info.priority > 10) {
+            fprintf(stderr,
+                    "processes: skipping invalid process %d (need id>=0, arrival>=1, runtime>=1, 0<=priority<=10)\n",
+                    info.id);
             continue;
         }
         if (count == capacity) {

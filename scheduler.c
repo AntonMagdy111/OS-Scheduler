@@ -23,6 +23,7 @@ static int generatorQueueId = -1;
 static int processQueueId = -1;
 static FILE *logFile = NULL;
 static int fatalError = 0;
+static volatile sig_atomic_t cleaningUp = 0;
 
 /* ------------------------------------------------------------------ */
 /*                    OS hooks called by the engine                    */
@@ -197,6 +198,9 @@ static void release_ipc(void)
 static void on_interrupt(int signum)
 {
     (void)signum;
+    if (cleaningUp)
+        _exit(1);
+    cleaningUp = 1;
     release_ipc();
     exit(1);
 }
